@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import toast from 'react-hot-toast'
@@ -8,45 +8,74 @@ import {
   MapPinIcon,
   UserGroupIcon,
   ChatBubbleLeftRightIcon,
-  ArrowRightIcon 
+  PhotoIcon,
+  ArrowRightIcon,
+  CheckCircleIcon,
+  XMarkIcon,
 } from '@heroicons/react/24/outline'
 
 export default function Setup() {
   const [currentStep, setCurrentStep] = useState(1)
   const [businessTypes, setBusinessTypes] = useState([])
   const [loading, setLoading] = useState(false)
+  const [logoFile, setLogoFile] = useState(null)
+  const [logoPreview, setLogoPreview] = useState(null)
+  const [logoUploading, setLogoUploading] = useState(false)
+  const logoInputRef = useRef(null)
   const navigate = useNavigate()
 
   const { register, handleSubmit, formState: { errors }, watch } = useForm()
 
   useEffect(() => {
-    // Load business types
     api.get('/business/types')
       .then(response => setBusinessTypes(response.data.business_types))
       .catch(err => console.error('Failed to load business types:', err))
   }, [])
 
+  const handleLogoChange = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    setLogoFile(file)
+    const reader = new FileReader()
+    reader.onload = (ev) => setLogoPreview(ev.target.result)
+    reader.readAsDataURL(file)
+  }
+
   const onSubmit = async (data) => {
     setLoading(true)
     try {
       await api.post('/business/profile', data)
-      toast.success('Business profile created! Generating your content...')
+
+      // Upload logo if provided
+      if (logoFile) {
+        setLogoUploading(true)
+        const formData = new FormData()
+        formData.append('logo', logoFile)
+        await api.post('/business/logo', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+        setLogoUploading(false)
+      }
+
+      toast.success('Business profile created!')
       navigate('/dashboard')
     } catch (error) {
       toast.error(error.response?.data?.error || 'Failed to save profile')
     } finally {
       setLoading(false)
+      setLogoUploading(false)
     }
   }
 
-  const nextStep = () => setCurrentStep(prev => Math.min(prev + 1, 4))
+  const nextStep = () => setCurrentStep(prev => Math.min(prev + 1, 5))
   const prevStep = () => setCurrentStep(prev => Math.max(prev - 1, 1))
 
   const steps = [
     { number: 1, title: 'Business Info', icon: BuildingStorefrontIcon },
     { number: 2, title: 'Location', icon: MapPinIcon },
     { number: 3, title: 'Audience', icon: UserGroupIcon },
-    { number: 4, title: 'Voice & Tone', icon: ChatBubbleLeftRightIcon }
+    { number: 4, title: 'Voice & Tone', icon: ChatBubbleLeftRightIcon },
+    { number: 5, title: 'Brand Logo', icon: PhotoIcon },
   ]
 
   return (
@@ -289,10 +318,65 @@ export default function Setup() {
                 </div>
 
                 <div className="bg-austin-blue bg-opacity-10 border border-austin-blue border-opacity-20 rounded-lg p-4">
-                  <h3 className="font-semibold text-austin-blue mb-2">🎯 What happens next?</h3>
+                  <h3 className="font-semibold text-austin-blue mb-2">🎯 Almost done!</h3>
                   <p className="text-sm text-austin-blue">
-                    We'll generate 30+ pieces of marketing content specifically for your Austin business, 
-                    including mentions of local events, Austin culture, and your neighborhood!
+                    One more optional step — add your brand logo to personalise AI-generated images.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Step 5: Brand Logo */}
+            {currentStep === 5 && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-2xl font-semibold text-gray-900 mb-1">
+                    Upload Your Brand Logo
+                  </h2>
+                  <p className="text-gray-500 text-sm">Optional — you can add or change this later from your dashboard.</p>
+                </div>
+
+                <div
+                  onClick={() => logoInputRef.current?.click()}
+                  className="border-2 border-dashed border-gray-300 hover:border-austin-orange rounded-xl p-8 text-center cursor-pointer transition-colors"
+                >
+                  {logoPreview ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <img src={logoPreview} alt="Logo preview" className="max-h-32 max-w-48 object-contain rounded-lg" />
+                      <span className="text-sm text-green-600 font-medium flex items-center gap-1">
+                        <CheckCircleIcon className="h-4 w-4" /> Logo ready to upload
+                      </span>
+                    </div>
+                  ) : (
+                    <div>
+                      <PhotoIcon className="h-14 w-14 text-gray-300 mx-auto mb-3" />
+                      <p className="text-sm font-medium text-gray-600">Click to upload your logo</p>
+                      <p className="text-xs text-gray-400 mt-1">PNG, JPG, SVG — up to 5 MB</p>
+                    </div>
+                  )}
+                </div>
+
+                <input
+                  ref={logoInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleLogoChange}
+                />
+
+                {logoPreview && (
+                  <button
+                    type="button"
+                    onClick={() => { setLogoFile(null); setLogoPreview(null) }}
+                    className="flex items-center gap-1 text-sm text-gray-400 hover:text-red-500 transition-colors"
+                  >
+                    <XMarkIcon className="h-4 w-4" /> Remove logo
+                  </button>
+                )}
+
+                <div className="bg-orange-50 border border-orange-200 rounded-lg p-4">
+                  <p className="text-sm text-orange-700">
+                    🎨 When you generate AI images for Facebook posts, you'll be able to automatically stamp your logo in the corner.
                   </p>
                 </div>
               </div>
@@ -309,7 +393,7 @@ export default function Setup() {
                 Previous
               </button>
               
-              {currentStep < 4 ? (
+              {currentStep < 5 ? (
                 <button
                   type="button"
                   onClick={nextStep}
@@ -320,10 +404,10 @@ export default function Setup() {
               ) : (
                 <button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || logoUploading}
                   className="austin-button disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {loading ? 'Creating Profile...' : 'Complete Setup'}
+                  {logoUploading ? 'Uploading logo...' : loading ? 'Creating Profile...' : 'Complete Setup'}
                 </button>
               )}
             </div>

@@ -157,6 +157,60 @@ Body:
     return await this.generateContent(prompt, 2500);
   }
 
+  // Generate a Facebook post caption based on an image description and business context
+  async generateCaptionFromImageDescription(imageDescription, businessData) {
+    const prompt = `You are a social media expert for a local Austin business.
+
+Business: ${businessData.business_name} (${businessData.business_type})
+Tone: ${businessData.tone || 'friendly'}
+Target audience: ${businessData.target_audience || 'local Austin community'}
+
+The business owner has a photo they want to post. Here is their description of the image:
+"${imageDescription}"
+
+Write a compelling Facebook post caption for this photo. Requirements:
+- Match the business tone (${businessData.tone || 'friendly'})
+- Keep it under 200 characters if possible
+- Include 2-3 relevant hashtags including #Austin
+- Sound natural and authentic, not like marketing copy
+- Encourage engagement (ask a question or include a call to action)
+
+Return ONLY the caption text with hashtags. No explanations, no quotes.`;
+
+    return await this.generateContent(prompt, 400);
+  }
+
+  // Generate an image using Amazon Nova Canvas
+  async generateImage(prompt) {
+    try {
+      const command = new InvokeModelCommand({
+        modelId: 'amazon.nova-canvas-v1:0',
+        contentType: 'application/json',
+        accept: 'application/json',
+        body: JSON.stringify({
+          taskType: 'TEXT_IMAGE',
+          textToImageParams: { text: prompt },
+          imageGenerationConfig: {
+            numberOfImages: 1,
+            quality: 'standard',
+            height: 1024,
+            width: 1024,
+            cfgScale: 6.5,
+            seed: Math.floor(Math.random() * 2147483647),
+          },
+        }),
+      });
+
+      const response = await this.client.send(command);
+      const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+      return responseBody.images[0]; // base64 string
+    } catch (error) {
+      console.error('Bedrock image generation error:', error);
+      const msg = error?.message || error?.name || 'Unknown error';
+      throw new Error(`Failed to generate image: ${msg}`);
+    }
+  }
+
   // Helper methods
   getCurrentSeason() {
     const month = new Date().getMonth() + 1;

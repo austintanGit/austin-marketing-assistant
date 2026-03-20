@@ -69,6 +69,78 @@ class Database {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+
+      // Social media connections table (OAuth tokens per platform per user)
+      `CREATE TABLE IF NOT EXISTS social_connections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        platform TEXT NOT NULL,
+        platform_user_id TEXT,
+        platform_page_id TEXT,
+        platform_page_name TEXT,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT,
+        token_expiry DATETIME,
+        extra_data TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        UNIQUE(user_id, platform)
+      )`,
+
+      // Social post log — tracks every published post for daily limit enforcement
+      `CREATE TABLE IF NOT EXISTS social_post_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        platform TEXT NOT NULL,
+        platform_post_id TEXT,
+        message TEXT,
+        has_image INTEGER DEFAULT 0,
+        image_source TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+
+      // Image generation log — tracks AI image generations for monthly limit enforcement
+      `CREATE TABLE IF NOT EXISTS image_generation_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        prompt TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+
+      // Email write log — tracks AI email generations for daily limit enforcement
+      `CREATE TABLE IF NOT EXISTS email_write_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+
+      // Post enhance log — tracks AI post enhancements for daily limit enforcement
+      `CREATE TABLE IF NOT EXISTS post_enhance_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+
+      // Content generate log — tracks bulk content generation for monthly limit enforcement
+      `CREATE TABLE IF NOT EXISTS content_generate_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+      )`,
+
+      // Caption generate log — tracks AI caption generation for daily limit enforcement
+      `CREATE TABLE IF NOT EXISTS caption_generate_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
       )`
     ];
 
@@ -79,6 +151,13 @@ class Database {
         }
       });
     });
+
+    // Safe migrations for existing tables
+    this.db.run('ALTER TABLE generated_content ADD COLUMN published_at DATETIME', () => {});
+    this.db.run('ALTER TABLE generated_content ADD COLUMN published_platforms TEXT', () => {});
+    this.db.run('ALTER TABLE users ADD COLUMN extra_image_credits INTEGER DEFAULT 0', () => {});
+    this.db.run('ALTER TABLE businesses ADD COLUMN logo_path TEXT', () => {});
+    this.db.run('ALTER TABLE subscriptions ADD COLUMN cancel_at_period_end INTEGER DEFAULT 0', () => {});
   }
 
   // Helper method for async queries

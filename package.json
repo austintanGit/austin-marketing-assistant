@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "install:frontend": "cd frontend && npm install",
-    "install:backend": "cd backend && npm install", 
+    "install:backend": "cd backend && npm install",
     "install:all": "npm run install:frontend && npm run install:backend",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:backend": "cd backend && npm run dev",
@@ -13,7 +13,13 @@
     "build": "cd frontend && npm run build",
     "start": "cd backend && npm start"
   },
-  "keywords": ["ai", "marketing", "small-business", "austin", "saas"],
+  "keywords": [
+    "ai",
+    "marketing",
+    "small-business",
+    "austin",
+    "saas"
+  ],
   "author": "Your Name",
   "license": "MIT",
   "devDependencies": {

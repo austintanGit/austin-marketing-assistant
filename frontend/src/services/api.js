@@ -2,7 +2,7 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: '/api', // This will proxy to localhost:3001/api in development
-  timeout: 10000,
+  timeout: 120000, // 2 minutes default
 })
 
 // Add request interceptor to include auth token

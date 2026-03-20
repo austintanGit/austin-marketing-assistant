@@ -9,13 +9,8 @@ export default function Navbar() {
       <div className="max-w-7xl mx-auto px-4">
         <div className="flex justify-between h-16">
           <div className="flex items-center">
-            <Link to="/" className="flex items-center space-x-2">
-              <div className="w-8 h-8 bg-austin-orange rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-sm">A</span>
-              </div>
-              <span className="font-bold text-xl text-austin-blue">
-                Austin Marketing Assistant
-              </span>
+            <Link to="/" className="flex items-center">
+              <img src="/logo.png" alt="Lume Content Posts" className="h-10 w-auto" />
             </Link>
           </div>
 
@@ -27,6 +22,12 @@ export default function Navbar() {
                   className="text-gray-700 hover:text-austin-orange px-3 py-2 rounded-md text-sm font-medium"
                 >
                   Dashboard
+                </Link>
+                <Link
+                  to="/connect-accounts"
+                  className="text-gray-700 hover:text-austin-orange px-3 py-2 rounded-md text-sm font-medium"
+                >
+                  Connect Accounts
                 </Link>
                 <div className="flex items-center space-x-2">
                   <span className="text-sm text-gray-600">

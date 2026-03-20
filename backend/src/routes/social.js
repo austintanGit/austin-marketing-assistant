@@ -1,0 +1,725 @@
+const express = require('express');
+const axios = require('axios');
+const crypto = require('crypto');
+const multer = require('multer');
+const FormData = require('form-data');
+const fs = require('fs');
+const sharp = require('sharp');
+const db = require('../database');
+const { authenticateToken } = require('./auth');
+const bedrock = require('../services/bedrock');
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024,   // 10 MB for file uploads
+    fieldSize: 10 * 1024 * 1024,  // 10 MB for base64 field values (AI-generated images)
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  },
+});
+
+const router = express.Router();
+
+// ─── OAuth State Token Helpers ────────────────────────────────────────────────
+// Encodes userId + timestamp into a signed state param so we know which user
+// is completing OAuth even though the callback doesn't carry a JWT.
+
+function generateStateToken(userId) {
+  const payload = `${userId}:${Date.now()}`;
+  const hmac = crypto.createHmac('sha256', process.env.JWT_SECRET);
+  hmac.update(payload);
+  const signature = hmac.digest('hex');
+  return Buffer.from(`${payload}:${signature}`).toString('base64url');
+}
+
+function verifyStateToken(state) {
+  try {
+    const decoded = Buffer.from(state, 'base64url').toString();
+    const lastColon = decoded.lastIndexOf(':');
+    const secondLastColon = decoded.lastIndexOf(':', lastColon - 1);
+    const payload = decoded.substring(0, lastColon);
+    const signature = decoded.substring(lastColon + 1);
+    const userId = decoded.substring(0, secondLastColon);
+    const timestamp = decoded.substring(secondLastColon + 1, lastColon);
+
+    // Reject if older than 15 minutes
+    if (Date.now() - parseInt(timestamp) > 15 * 60 * 1000) return null;
+
+    const hmac = crypto.createHmac('sha256', process.env.JWT_SECRET);
+    hmac.update(payload);
+    const expected = hmac.digest('hex');
+    if (signature !== expected) return null;
+
+    return parseInt(userId);
+  } catch {
+    return null;
+  }
+}
+
+const POST_ENHANCE_DAILY_LIMIT = 10;
+
+// ─── POST /api/social/facebook/enhance-post ───────────────────────────────────
+// AI-enhances a draft Facebook post message using business context
+
+router.post('/facebook/enhance-post', authenticateToken, async (req, res) => {
+  const { message } = req.body;
+  if (!message?.trim()) {
+    return res.status(400).json({ error: 'message is required' });
+  }
+  try {
+    // Check daily limit
+    const usageRow = await db.get(
+      `SELECT COUNT(*) as count FROM post_enhance_log
+       WHERE user_id = ? AND date(created_at) = date('now', 'localtime')`,
+      [req.user.userId]
+    );
+    const used = usageRow?.count || 0;
+    if (used >= POST_ENHANCE_DAILY_LIMIT) {
+      return res.status(429).json({
+        error: `Daily AI assist limit reached (${POST_ENHANCE_DAILY_LIMIT}/day). Resets at midnight.`,
+      });
+    }
+
+    const business = await db.get('SELECT * FROM businesses WHERE user_id = ?', [req.user.userId]);
+
+    const prompt = `You are a social media expert for a local Austin business.
+${business ? `Business: ${business.business_name} (${business.business_type})
+Tone: ${business.tone || 'friendly'}
+Target audience: ${business.target_audience || 'local Austin customers'}` : ''}
+
+The business owner wrote this draft Facebook post:
+"${message}"
+
+Rewrite it to be more engaging and effective. Requirements:
+- Keep the core message and intent exactly the same
+- Make it more compelling and scroll-stopping
+- Add relevant emojis where natural (1-3 max)
+- Include 2-3 relevant hashtags at the end (#Austin and topic-specific)
+- Keep it concise (under 280 characters if possible)
+- Match the ${business?.tone || 'friendly'} tone
+- Sound authentic, not like generic marketing copy
+
+Return ONLY the enhanced post text. No explanations, no quotes.`;
+
+    const enhanced = await bedrock.generateContent(prompt, 300);
+
+    // Log usage
+    await db.run('INSERT INTO post_enhance_log (user_id) VALUES (?)', [req.user.userId]);
+
+    const remaining = POST_ENHANCE_DAILY_LIMIT - used - 1;
+    res.json({ enhanced: enhanced.trim(), remaining, limit: POST_ENHANCE_DAILY_LIMIT });
+  } catch (err) {
+    console.error('Enhance post error:', err);
+    res.status(500).json({ error: err.message || 'Failed to enhance post' });
+  }
+});
+
+// ─── GET /api/social/connections ─────────────────────────────────────────────
+
+router.get('/connections', authenticateToken, async (req, res) => {
+  try {
+    const rows = await db.query(
+      `SELECT platform, platform_page_id, platform_page_name, extra_data, created_at
+       FROM social_connections WHERE user_id = ?`,
+      [req.user.userId]
+    );
+
+    const connections = {};
+    rows.forEach(row => {
+      connections[row.platform] = {
+        connected: true,
+        page_name: row.platform_page_name,
+        page_id: row.platform_page_id,
+        extra_data: row.extra_data ? JSON.parse(row.extra_data) : null,
+        connected_at: row.created_at,
+      };
+    });
+
+    res.json({ connections });
+  } catch (err) {
+    console.error('Get connections error:', err);
+    res.status(500).json({ error: 'Failed to get connections' });
+  }
+});
+
+// ─── Facebook OAuth ───────────────────────────────────────────────────────────
+
+router.get('/facebook/auth', authenticateToken, (req, res) => {
+  if (!process.env.FACEBOOK_APP_ID || !process.env.FACEBOOK_APP_SECRET) {
+    return res.status(400).json({ error: 'Facebook OAuth is not configured. Add FACEBOOK_APP_ID and FACEBOOK_APP_SECRET to your .env file.' });
+  }
+
+  const state = generateStateToken(req.user.userId);
+  const redirectUri = process.env.FACEBOOK_REDIRECT_URI || 'http://localhost:3001/api/social/facebook/callback';
+
+  const url =
+    `https://www.facebook.com/v18.0/dialog/oauth` +
+    `?client_id=${process.env.FACEBOOK_APP_ID}` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&scope=pages_manage_posts,pages_read_engagement,pages_show_list` +
+    `&state=${state}`;
+
+  res.json({ url });
+});
+
+router.get('/facebook/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+  if (error) {
+    return res.redirect(`${frontendUrl}/connect-accounts?error=facebook_denied`);
+  }
+
+  const userId = verifyStateToken(state);
+  if (!userId) {
+    return res.redirect(`${frontendUrl}/connect-accounts?error=invalid_state`);
+  }
+
+  try {
+    const redirectUri = process.env.FACEBOOK_REDIRECT_URI || 'http://localhost:3001/api/social/facebook/callback';
+
+    // Exchange code for short-lived token
+    const tokenRes = await axios.get('https://graph.facebook.com/v18.0/oauth/access_token', {
+      params: {
+        client_id: process.env.FACEBOOK_APP_ID,
+        client_secret: process.env.FACEBOOK_APP_SECRET,
+        redirect_uri: redirectUri,
+        code,
+      },
+    });
+    const shortLivedToken = tokenRes.data.access_token;
+
+    // Exchange for long-lived token
+    const longRes = await axios.get('https://graph.facebook.com/v18.0/oauth/access_token', {
+      params: {
+        grant_type: 'fb_exchange_token',
+        client_id: process.env.FACEBOOK_APP_ID,
+        client_secret: process.env.FACEBOOK_APP_SECRET,
+        fb_exchange_token: shortLivedToken,
+      },
+    });
+    const longLivedToken = longRes.data.access_token;
+
+    // Get pages the user manages
+    const pagesRes = await axios.get('https://graph.facebook.com/v18.0/me/accounts', {
+      params: { access_token: longLivedToken },
+    });
+    const pages = pagesRes.data.data || [];
+
+    let pageId = null;
+    let pageName = null;
+    let pageToken = null;
+    let instagramAccountId = null;
+
+    if (pages.length > 0) {
+      pageId = pages[0].id;
+      pageName = pages[0].name;
+      pageToken = pages[0].access_token; // Page-level permanent token
+
+      // Check for connected Instagram business account
+      try {
+        const igRes = await axios.get(`https://graph.facebook.com/v18.0/${pageId}`, {
+          params: {
+            fields: 'instagram_business_account',
+            access_token: pageToken,
+          },
+        });
+        instagramAccountId = igRes.data.instagram_business_account?.id || null;
+      } catch (igErr) {
+        console.warn('Could not fetch Instagram account:', igErr.message);
+      }
+    }
+
+    // Store Facebook connection
+    await db.run(
+      `INSERT OR REPLACE INTO social_connections
+         (user_id, platform, access_token, platform_page_id, platform_page_name, extra_data, updated_at)
+       VALUES (?, 'facebook', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      [
+        userId,
+        pageToken || longLivedToken,
+        pageId,
+        pageName || 'Facebook Page',
+        JSON.stringify({ pages, instagramAccountId }),
+      ]
+    );
+
+    // Store Instagram connection if available
+    if (instagramAccountId && pageToken) {
+      await db.run(
+        `INSERT OR REPLACE INTO social_connections
+           (user_id, platform, access_token, platform_page_id, platform_page_name, extra_data, updated_at)
+         VALUES (?, 'instagram', ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [
+          userId,
+          pageToken,
+          instagramAccountId,
+          pageName ? `${pageName} (Instagram)` : 'Instagram Business',
+          JSON.stringify({ facebookPageId: pageId }),
+        ]
+      );
+    }
+
+    res.redirect(`${frontendUrl}/connect-accounts?connected=facebook`);
+  } catch (err) {
+    console.error('Facebook OAuth callback error:', err.response?.data || err.message);
+    res.redirect(`${frontendUrl}/connect-accounts?error=facebook_failed`);
+  }
+});
+
+// ─── GET /api/social/facebook/posts ──────────────────────────────────────────
+// Returns the most recent Facebook posts submitted by the user
+
+router.get('/facebook/posts', authenticateToken, async (req, res) => {
+  try {
+    const rows = await db.query(
+      `SELECT id, message, has_image, image_source, platform_post_id, created_at
+       FROM social_post_log
+       WHERE user_id = ? AND platform = 'facebook'
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      [req.user.userId]
+    );
+    res.json({ posts: rows });
+  } catch (err) {
+    console.error('Get facebook posts error:', err);
+    res.status(500).json({ error: 'Failed to get posts' });
+  }
+});
+
+// ─── GET /api/social/facebook/post-status ────────────────────────────────────
+// Returns how many posts the user has made today and whether they can post
+
+router.get('/facebook/post-status', authenticateToken, async (req, res) => {
+  try {
+    const row = await db.get(
+      `SELECT COUNT(*) as count FROM social_post_log
+       WHERE user_id = ? AND platform = 'facebook' AND date(created_at) = date('now', 'localtime')`,
+      [req.user.userId]
+    );
+    const postsToday = row?.count || 0;
+    res.json({ posts_today: postsToday, limit: null, can_post: true });
+  } catch (err) {
+    console.error('Post status error:', err);
+    res.status(500).json({ error: 'Failed to check post status' });
+  }
+});
+
+// ─── POST /api/social/facebook/generate-caption ──────────────────────────────
+// Generate a Facebook caption from an image description using AI
+
+const CAPTION_DAILY_LIMIT = 10;
+
+router.post('/facebook/generate-caption', authenticateToken, async (req, res) => {
+  const { image_description } = req.body;
+  if (!image_description?.trim()) {
+    return res.status(400).json({ error: 'image_description is required' });
+  }
+  try {
+    // Check daily limit
+    const usageRow = await db.get(
+      `SELECT COUNT(*) as count FROM caption_generate_log
+       WHERE user_id = ? AND date(created_at) = date('now', 'localtime')`,
+      [req.user.userId]
+    );
+    if ((usageRow?.count || 0) >= CAPTION_DAILY_LIMIT) {
+      return res.status(429).json({
+        error: `Daily caption limit reached (${CAPTION_DAILY_LIMIT}/day). Resets at midnight.`,
+      });
+    }
+
+    const business = await db.get('SELECT * FROM businesses WHERE user_id = ?', [req.user.userId]);
+    if (!business) return res.status(404).json({ error: 'Business profile not found' });
+
+    const caption = await bedrock.generateCaptionFromImageDescription(image_description, business);
+
+    // Log usage
+    await db.run('INSERT INTO caption_generate_log (user_id) VALUES (?)', [req.user.userId]);
+
+    const remaining = CAPTION_DAILY_LIMIT - (usageRow?.count || 0) - 1;
+    res.json({ caption, remaining, limit: CAPTION_DAILY_LIMIT });
+  } catch (err) {
+    console.error('Generate caption error:', err);
+    res.status(500).json({ error: err.message || 'Failed to generate caption' });
+  }
+});
+
+const MONTHLY_IMAGE_LIMIT = 50;
+const IMAGE_CREDIT_PACK_CREDITS = 25;
+const IMAGE_CREDIT_PACK_PRICE_CENTS = 299; // $2.99
+
+// Helper: get full image quota for a user
+async function getImageQuota(userId) {
+  const [usageRow, userRow] = await Promise.all([
+    db.get(
+      `SELECT COUNT(*) as count FROM image_generation_log
+       WHERE user_id = ? AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', 'localtime')`,
+      [userId]
+    ),
+    db.get('SELECT extra_image_credits FROM users WHERE id = ?', [userId]),
+  ]);
+  const usedThisMonth = usageRow?.count || 0;
+  const extraCredits = userRow?.extra_image_credits || 0;
+  const monthlyRemaining = Math.max(0, MONTHLY_IMAGE_LIMIT - usedThisMonth);
+  const totalRemaining = monthlyRemaining + extraCredits;
+  return {
+    used_this_month: usedThisMonth,
+    monthly_limit: MONTHLY_IMAGE_LIMIT,
+    monthly_remaining: monthlyRemaining,
+    extra_credits: extraCredits,
+    total_remaining: totalRemaining,
+    can_generate: totalRemaining > 0,
+  };
+}
+
+// ─── GET /api/social/facebook/image-quota ────────────────────────────────────
+
+router.get('/facebook/image-quota', authenticateToken, async (req, res) => {
+  try {
+    const quota = await getImageQuota(req.user.userId);
+    res.json(quota);
+  } catch (err) {
+    console.error('Image quota error:', err);
+    res.status(500).json({ error: 'Failed to check image quota' });
+  }
+});
+
+// ─── POST /api/social/facebook/generate-image ────────────────────────────────
+// Generate an AI image using AWS Bedrock Nova Canvas
+
+router.post('/facebook/generate-image', authenticateToken, async (req, res) => {
+  const { prompt } = req.body;
+  if (!prompt?.trim()) {
+    return res.status(400).json({ error: 'prompt is required' });
+  }
+  try {
+    const quota = await getImageQuota(req.user.userId);
+    if (!quota.can_generate) {
+      return res.status(429).json({
+        error: `No image credits remaining. Your monthly ${MONTHLY_IMAGE_LIMIT} resets on the 1st, or buy a top-up pack.`,
+      });
+    }
+
+    // Enrich prompt with business context so image is relevant
+    const business = await db.get('SELECT * FROM businesses WHERE user_id = ?', [req.user.userId]);
+    const enrichedPrompt = business
+      ? `${prompt}, for a ${business.business_type} business called ${business.business_name} in Austin Texas, professional marketing photo, high quality`
+      : `${prompt}, Austin Texas, professional marketing photo, high quality`;
+
+    let imageB64 = await bedrock.generateImage(enrichedPrompt);
+
+    // Composite logo if requested and available
+    const includeLogo = req.body.include_logo === true || req.body.include_logo === 'true';
+    if (includeLogo && business?.logo_path && fs.existsSync(business.logo_path)) {
+      try {
+        const imageBuffer = Buffer.from(imageB64, 'base64');
+        const logoBuffer = await sharp(business.logo_path)
+          .resize({ width: 180, height: 180, fit: 'inside' })
+          .toBuffer();
+
+        const composited = await sharp(imageBuffer)
+          .composite([{ input: logoBuffer, gravity: 'southeast', blend: 'over' }])
+          .png()
+          .toBuffer();
+
+        imageB64 = composited.toString('base64');
+      } catch (logoErr) {
+        console.warn('Logo compositing failed, returning image without logo:', logoErr.message);
+      }
+    }
+
+    // Log generation
+    await db.run('INSERT INTO image_generation_log (user_id, prompt) VALUES (?, ?)', [req.user.userId, prompt]);
+
+    // If monthly base was exhausted, deduct from extra credits
+    if (quota.monthly_remaining === 0 && quota.extra_credits > 0) {
+      await db.run(
+        'UPDATE users SET extra_image_credits = extra_image_credits - 1 WHERE id = ?',
+        [req.user.userId]
+      );
+    }
+
+    const updatedQuota = await getImageQuota(req.user.userId);
+    res.json({ image_b64: imageB64, quota: updatedQuota });
+  } catch (err) {
+    console.error('Generate image error:', err);
+    res.status(500).json({ error: err.message || 'Failed to generate image' });
+  }
+});
+
+// ─── POST /api/social/facebook/buy-image-credits ─────────────────────────────
+// Creates a Stripe one-time checkout for an image credit top-up pack
+
+router.post('/facebook/buy-image-credits', authenticateToken, async (req, res) => {
+  try {
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    const user = await db.get('SELECT * FROM users WHERE id = ?', [req.user.userId]);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      customer_email: user.email,
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `${IMAGE_CREDIT_PACK_CREDITS} AI Image Credits`,
+            description: `Add ${IMAGE_CREDIT_PACK_CREDITS} extra image generations to your account. Credits never expire.`,
+          },
+          unit_amount: IMAGE_CREDIT_PACK_PRICE_CENTS,
+        },
+        quantity: 1,
+      }],
+      metadata: {
+        type: 'image_credits',
+        userId: req.user.userId.toString(),
+        credits: IMAGE_CREDIT_PACK_CREDITS.toString(),
+      },
+      success_url: `${process.env.FRONTEND_URL}/dashboard?credit_session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/dashboard`,
+    });
+
+    res.json({ checkout_url: session.url });
+  } catch (err) {
+    console.error('Buy image credits error:', err);
+    res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
+
+// ─── POST /api/social/facebook/verify-credit-purchase ────────────────────────
+// Called by frontend after Stripe redirects back with a session_id
+
+router.post('/facebook/verify-credit-purchase', authenticateToken, async (req, res) => {
+  try {
+    const { session_id } = req.body;
+    if (!session_id) return res.status(400).json({ error: 'session_id required' });
+
+    const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+
+    if (session.metadata?.type !== 'image_credits') {
+      return res.status(400).json({ error: 'Invalid session type' });
+    }
+    if (session.metadata?.userId !== req.user.userId.toString()) {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({ error: 'Payment not completed' });
+    }
+
+    // Prevent double-crediting by checking if this session was already processed
+    const alreadyProcessed = await db.get(
+      'SELECT id FROM image_generation_log WHERE user_id = ? AND prompt = ?',
+      [req.user.userId, `__credit_purchase__${session_id}`]
+    );
+    if (alreadyProcessed) {
+      const quota = await getImageQuota(req.user.userId);
+      return res.json({ already_processed: true, quota });
+    }
+
+    const credits = parseInt(session.metadata.credits, 10);
+    await db.run(
+      'UPDATE users SET extra_image_credits = extra_image_credits + ? WHERE id = ?',
+      [credits, req.user.userId]
+    );
+    // Record as processed
+    await db.run(
+      'INSERT INTO image_generation_log (user_id, prompt) VALUES (?, ?)',
+      [req.user.userId, `__credit_purchase__${session_id}`]
+    );
+
+    const quota = await getImageQuota(req.user.userId);
+    res.json({ success: true, credits_added: credits, quota });
+  } catch (err) {
+    console.error('Verify credit purchase error:', err);
+    res.status(500).json({ error: 'Failed to verify purchase' });
+  }
+});
+
+// ─── POST /api/social/facebook/post ──────────────────────────────────────────
+// Post to Facebook with optional image (upload or AI-generated base64)
+
+router.post('/facebook/post', authenticateToken, upload.single('image'), async (req, res) => {
+  try {
+    const connection = await db.get(
+      'SELECT * FROM social_connections WHERE user_id = ? AND platform = ?',
+      [req.user.userId, 'facebook']
+    );
+    if (!connection) {
+      return res.status(400).json({ error: 'Facebook account not connected' });
+    }
+
+    const message = (req.body.message || '').trim();
+    const imageSource = req.body.image_source; // 'none' | 'upload' | 'ai'
+    const imageB64 = req.body.image_b64;       // base64 string for AI-generated images
+
+    let platformPostId = null;
+
+    if (imageSource === 'upload' && req.file) {
+      // Post photo from uploaded file buffer
+      const form = new FormData();
+      form.append('source', req.file.buffer, {
+        filename: req.file.originalname,
+        contentType: req.file.mimetype,
+      });
+      if (message) form.append('message', message);
+      form.append('access_token', connection.access_token);
+
+      const photoRes = await axios.post(
+        `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+        form,
+        { headers: form.getHeaders() }
+      );
+      platformPostId = photoRes.data.post_id || photoRes.data.id;
+
+    } else if (imageSource === 'ai' && imageB64) {
+      // Post photo from AI-generated base64 image
+      const imgBuffer = Buffer.from(imageB64, 'base64');
+      const form = new FormData();
+      form.append('source', imgBuffer, { filename: 'ai-generated.png', contentType: 'image/png' });
+      if (message) form.append('message', message);
+      form.append('access_token', connection.access_token);
+
+      const photoRes = await axios.post(
+        `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+        form,
+        { headers: form.getHeaders() }
+      );
+      platformPostId = photoRes.data.post_id || photoRes.data.id;
+
+    } else {
+      // Text-only post
+      if (!message) return res.status(400).json({ error: 'A message is required for text-only posts' });
+      const feedRes = await axios.post(
+        `https://graph.facebook.com/v18.0/${connection.platform_page_id}/feed`,
+        { message, access_token: connection.access_token }
+      );
+      platformPostId = feedRes.data.id;
+    }
+
+    // Log the post
+    await db.run(
+      `INSERT INTO social_post_log (user_id, platform, platform_post_id, message, has_image, image_source)
+       VALUES (?, 'facebook', ?, ?, ?, ?)`,
+      [req.user.userId, platformPostId, message, imageSource !== 'none' ? 1 : 0, imageSource]
+    );
+
+    res.json({ success: true, post_id: platformPostId });
+  } catch (err) {
+    console.error('Facebook post error:', err.response?.data || err.message);
+    const fbError = err.response?.data?.error?.message;
+    res.status(500).json({ error: fbError || 'Failed to post to Facebook' });
+  }
+});
+
+// ─── POST /api/social/publish/:contentId ─────────────────────────────────────
+
+router.post('/publish/:contentId', authenticateToken, async (req, res) => {
+  const { contentId } = req.params;
+  const { platforms } = req.body;
+
+  if (!platforms || !Array.isArray(platforms) || platforms.length === 0) {
+    return res.status(400).json({ error: 'Specify at least one platform to publish to.' });
+  }
+
+  try {
+    const business = await db.get('SELECT id FROM businesses WHERE user_id = ?', [req.user.userId]);
+    if (!business) return res.status(404).json({ error: 'Business not found' });
+
+    const contentItem = await db.get(
+      'SELECT * FROM generated_content WHERE id = ? AND business_id = ?',
+      [contentId, business.id]
+    );
+    if (!contentItem) return res.status(404).json({ error: 'Content not found' });
+
+    const results = {};
+    const errors = {};
+
+    await Promise.allSettled(
+      platforms.map(async (platform) => {
+        try {
+          const connection = await db.get(
+            'SELECT * FROM social_connections WHERE user_id = ? AND platform = ?',
+            [req.user.userId, platform]
+          );
+
+          if (!connection) {
+            errors[platform] = 'Account not connected';
+            return;
+          }
+
+          if (platform === 'facebook') {
+            await publishToFacebook(connection, contentItem);
+          } else if (platform === 'instagram') {
+            throw new Error('Instagram requires a media image. Use "Copy" and post manually.');
+          }
+
+          results[platform] = 'published';
+        } catch (err) {
+          console.error(`Publish to ${platform} failed:`, err.message);
+          errors[platform] = err.message;
+        }
+      })
+    );
+
+    if (Object.keys(results).length > 0) {
+      const publishedPlatforms = Object.keys(results).join(',');
+      await db.run(
+        `UPDATE generated_content
+         SET status = 'published', published_at = CURRENT_TIMESTAMP, published_platforms = ?
+         WHERE id = ?`,
+        [publishedPlatforms, contentId]
+      );
+    }
+
+    res.json({
+      message: Object.keys(results).length > 0 ? 'Content published!' : 'All platforms failed',
+      results,
+      errors: Object.keys(errors).length > 0 ? errors : undefined,
+    });
+  } catch (err) {
+    console.error('Publish error:', err);
+    res.status(500).json({ error: 'Failed to publish content' });
+  }
+});
+
+// ─── DELETE /api/social/connections/:platform ─────────────────────────────────
+
+router.delete('/connections/:platform', authenticateToken, async (req, res) => {
+  try {
+    await db.run(
+      'DELETE FROM social_connections WHERE user_id = ? AND platform = ?',
+      [req.user.userId, req.params.platform]
+    );
+    res.json({ message: `${req.params.platform} disconnected successfully` });
+  } catch (err) {
+    console.error('Disconnect error:', err);
+    res.status(500).json({ error: 'Failed to disconnect account' });
+  }
+});
+
+// ─── Platform Publishing Helpers ──────────────────────────────────────────────
+
+async function publishToFacebook(connection, contentItem) {
+  if (!connection.platform_page_id || !connection.access_token) {
+    throw new Error('Facebook page not configured. Please reconnect your Facebook account.');
+  }
+
+  const message = contentItem.title
+    ? `${contentItem.title}\n\n${contentItem.content}`.substring(0, 63206)
+    : contentItem.content.substring(0, 63206);
+
+  await axios.post(
+    `https://graph.facebook.com/v18.0/${connection.platform_page_id}/feed`,
+    {
+      message,
+      access_token: connection.access_token,
+    }
+  );
+}
+
+module.exports = router;
