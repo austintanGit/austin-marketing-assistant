@@ -2,12 +2,11 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const multer = require('multer');
-const FormData = require('form-data');
-const fs = require('fs');
 const sharp = require('sharp');
 const db = require('../database');
 const { authenticateToken } = require('./auth');
 const bedrock = require('../services/bedrock');
+const s3 = require('../services/s3');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -409,27 +408,38 @@ router.post('/facebook/generate-image', authenticateToken, async (req, res) => {
       ? `${prompt}, for a ${business.business_type} business called ${business.business_name} in Austin Texas, professional marketing photo, high quality`
       : `${prompt}, Austin Texas, professional marketing photo, high quality`;
 
-    let imageB64 = await bedrock.generateImage(enrichedPrompt);
+    let imageBuffer = Buffer.from(await bedrock.generateImage(enrichedPrompt), 'base64');
 
     // Composite logo if requested and available
     const includeLogo = req.body.include_logo === true || req.body.include_logo === 'true';
-    if (includeLogo && business?.logo_path && fs.existsSync(business.logo_path)) {
+    if (includeLogo && business?.logo_path) {
       try {
-        const imageBuffer = Buffer.from(imageB64, 'base64');
-        const logoBuffer = await sharp(business.logo_path)
-          .resize({ width: 180, height: 180, fit: 'inside' })
-          .toBuffer();
+        // Download the processed logo PNG from S3
+        const logoBuffer = await s3.downloadBuffer(business.logo_path);
 
-        const composited = await sharp(imageBuffer)
-          .composite([{ input: logoBuffer, gravity: 'southeast', blend: 'over' }])
+        // Resize logo to 20% of the AI image width (1024px → max 200px), preserving transparency
+        const aiMeta = await sharp(imageBuffer).metadata();
+        const logoSize = Math.round((aiMeta.width || 1024) * 0.20);
+
+        const resizedLogo = await sharp(logoBuffer)
+          .resize({ width: logoSize, height: logoSize, fit: 'inside', withoutEnlargement: true })
           .png()
           .toBuffer();
 
-        imageB64 = composited.toString('base64');
+        imageBuffer = await sharp(imageBuffer)
+          .composite([{ input: resizedLogo, gravity: 'southeast', blend: 'over' }])
+          .png()
+          .toBuffer();
+
+        console.log(`Logo composited at ${logoSize}px on AI image`);
       } catch (logoErr) {
-        console.warn('Logo compositing failed, returning image without logo:', logoErr.message);
+        console.warn('Logo compositing failed, continuing without logo:', logoErr.message);
       }
     }
+
+    // Upload final image to S3 → return CDN URL (no more base64 to browser)
+    const s3Key = `ai-images/${req.user.userId}/${Date.now()}.png`;
+    const imageUrl = await s3.uploadBuffer(imageBuffer, s3Key);
 
     // Log generation
     await db.run('INSERT INTO image_generation_log (user_id, prompt) VALUES (?, ?)', [req.user.userId, prompt]);
@@ -443,7 +453,7 @@ router.post('/facebook/generate-image', authenticateToken, async (req, res) => {
     }
 
     const updatedQuota = await getImageQuota(req.user.userId);
-    res.json({ image_b64: imageB64, quota: updatedQuota });
+    res.json({ image_url: imageUrl, quota: updatedQuota });
   } catch (err) {
     console.error('Generate image error:', err);
     res.status(500).json({ error: err.message || 'Failed to generate image' });
@@ -555,39 +565,26 @@ router.post('/facebook/post', authenticateToken, upload.single('image'), async (
 
     const message = (req.body.message || '').trim();
     const imageSource = req.body.image_source; // 'none' | 'upload' | 'ai'
-    const imageB64 = req.body.image_b64;       // base64 string for AI-generated images
+    const imageUrl = req.body.image_url;        // CDN URL for AI-generated images
 
     let platformPostId = null;
 
     if (imageSource === 'upload' && req.file) {
-      // Post photo from uploaded file buffer
-      const form = new FormData();
-      form.append('source', req.file.buffer, {
-        filename: req.file.originalname,
-        contentType: req.file.mimetype,
-      });
-      if (message) form.append('message', message);
-      form.append('access_token', connection.access_token);
+      // Upload user photo to S3, then post via CDN URL to Facebook
+      const s3Key = `uploads/${req.user.userId}/${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+      const uploadedUrl = await s3.uploadBuffer(req.file.buffer, s3Key, req.file.mimetype);
 
       const photoRes = await axios.post(
         `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
-        form,
-        { headers: form.getHeaders() }
+        { url: uploadedUrl, ...(message && { message }), access_token: connection.access_token }
       );
       platformPostId = photoRes.data.post_id || photoRes.data.id;
 
-    } else if (imageSource === 'ai' && imageB64) {
-      // Post photo from AI-generated base64 image
-      const imgBuffer = Buffer.from(imageB64, 'base64');
-      const form = new FormData();
-      form.append('source', imgBuffer, { filename: 'ai-generated.png', contentType: 'image/png' });
-      if (message) form.append('message', message);
-      form.append('access_token', connection.access_token);
-
+    } else if (imageSource === 'ai' && imageUrl) {
+      // AI image is already on S3/CDN — post directly via URL
       const photoRes = await axios.post(
         `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
-        form,
-        { headers: form.getHeaders() }
+        { url: imageUrl, ...(message && { message }), access_token: connection.access_token }
       );
       platformPostId = photoRes.data.post_id || photoRes.data.id;
 

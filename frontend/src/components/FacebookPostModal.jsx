@@ -29,7 +29,7 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
   // AI image state
   const [aiPrompt, setAiPrompt] = useState('')
   const [generatingImage, setGeneratingImage] = useState(false)
-  const [aiImageB64, setAiImageB64] = useState(null)
+  const [aiImageUrl, setAiImageUrl] = useState(null)
   const [imageQuota, setImageQuota] = useState(null)
   const [includeLogo, setIncludeLogo] = useState(false)
   const [hasLogo, setHasLogo] = useState(false)
@@ -53,7 +53,7 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       setUploadPreview(null)
       setImageDescription('')
       setAiPrompt('')
-      setAiImageB64(null)
+      setAiImageUrl(null)
       setShowAiAssist(false)
       loadImageQuota()
     }
@@ -138,10 +138,10 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       return
     }
     setGeneratingImage(true)
-    setAiImageB64(null)
+    setAiImageUrl(null)
     try {
       const res = await api.post('/social/facebook/generate-image', { prompt: aiPrompt, include_logo: includeLogo })
-      setAiImageB64(res.data.image_b64)
+      setAiImageUrl(res.data.image_url)
       if (res.data.quota) setImageQuota(res.data.quota)
       toast.success('Image generated!')
     } catch (err) {
@@ -169,7 +169,7 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       toast.error('Please select a photo to upload')
       return
     }
-    if (imageMode === 'ai' && !aiImageB64) {
+    if (imageMode === 'ai' && !aiImageUrl) {
       toast.error('Please generate an image first')
       return
     }
@@ -182,8 +182,8 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
 
       if (imageMode === 'upload' && uploadedFile) {
         formData.append('image', uploadedFile)
-      } else if (imageMode === 'ai' && aiImageB64) {
-        formData.append('image_b64', aiImageB64)
+      } else if (imageMode === 'ai' && aiImageUrl) {
+        formData.append('image_url', aiImageUrl)
       }
 
       await api.post('/social/facebook/post', formData, {
@@ -481,10 +481,10 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
                 </div>
               )}
 
-              {aiImageB64 && (
+              {aiImageUrl && (
                 <div className="space-y-2">
                   <img
-                    src={`data:image/png;base64,${aiImageB64}`}
+                    src={aiImageUrl}
                     alt="AI generated"
                     className="w-full rounded-xl object-contain max-h-64"
                   />

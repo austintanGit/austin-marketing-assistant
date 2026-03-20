@@ -1,28 +1,22 @@
 const express = require('express');
 const Joi = require('joi');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const sharp = require('sharp');
 const { authenticateToken } = require('./auth');
 const db = require('../database');
+const s3 = require('../services/s3');
 
 const router = express.Router();
 
-const logoStorage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = path.join(__dirname, '../../uploads/logos');
-    fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname) || '.png';
-    cb(null, `logo_${req.user.userId}_${Date.now()}${ext}`);
-  },
-});
+// Logo requirements:
+//   - Any image format (PNG recommended for transparency)
+//   - Max 10 MB upload
+//   - Will be resized to max 240×240 px and converted to PNG before storage
+//   - Transparent background is preserved and ideal for overlay on AI images
 
 const logoUpload = multer({
-  storage: logoStorage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) cb(null, true);
     else cb(new Error('Only image files are allowed'));
@@ -124,7 +118,7 @@ router.get('/profile', authenticateToken, async (req, res) => {
   }
 });
 
-// Upload brand logo
+// Upload brand logo → processed with sharp (max 240×240, PNG) → stored on S3
 router.post('/logo', authenticateToken, logoUpload.single('logo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No logo file provided' });
@@ -132,43 +126,55 @@ router.post('/logo', authenticateToken, logoUpload.single('logo'), async (req, r
     const business = await db.get('SELECT id, logo_path FROM businesses WHERE user_id = ?', [req.user.userId]);
     if (!business) return res.status(404).json({ error: 'Business profile not found' });
 
-    // Remove old logo file if it exists
-    if (business.logo_path && fs.existsSync(business.logo_path)) {
-      fs.unlinkSync(business.logo_path);
+    // Normalise to PNG, resize to max 240×240, preserve transparency
+    const processedBuffer = await sharp(req.file.buffer)
+      .resize({ width: 240, height: 240, fit: 'inside', withoutEnlargement: true })
+      .png({ compressionLevel: 8 })
+      .toBuffer();
+
+    // Delete old logo from S3 if it exists
+    if (business.logo_path && business.logo_path.startsWith('lume/')) {
+      try { await s3.deleteKey(business.logo_path); } catch {}
     }
 
+    const s3Key = `lume/logos/${req.user.userId}/logo_${Date.now()}.png`;
+    const cdnUrl = await s3.uploadBuffer(processedBuffer, `logos/${req.user.userId}/logo_${Date.now()}.png`);
+
+    // Store the S3 key (without CDN base) so we can delete/re-fetch it later
+    const storedKey = s3.urlToKey(cdnUrl);
     await db.run(
       'UPDATE businesses SET logo_path = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?',
-      [req.file.path, req.user.userId]
+      [storedKey, req.user.userId]
     );
 
-    res.json({ message: 'Logo uploaded successfully', logo_url: `/api/business/logo` });
+    res.json({ message: 'Logo uploaded successfully', logo_url: cdnUrl });
   } catch (err) {
     console.error('Logo upload error:', err);
     res.status(500).json({ error: 'Failed to upload logo' });
   }
 });
 
-// Serve brand logo
+// Returns the CDN URL of the logo (or 404 if none)
 router.get('/logo', authenticateToken, async (req, res) => {
   try {
     const business = await db.get('SELECT logo_path FROM businesses WHERE user_id = ?', [req.user.userId]);
-    if (!business?.logo_path || !fs.existsSync(business.logo_path)) {
+    if (!business?.logo_path) {
       return res.status(404).json({ error: 'No logo uploaded' });
     }
-    res.sendFile(path.resolve(business.logo_path));
+    const logoUrl = s3.cdnUrl(business.logo_path);
+    res.json({ logo_url: logoUrl });
   } catch (err) {
-    console.error('Serve logo error:', err);
-    res.status(500).json({ error: 'Failed to serve logo' });
+    console.error('Get logo error:', err);
+    res.status(500).json({ error: 'Failed to get logo' });
   }
 });
 
-// Delete brand logo
+// Delete brand logo from S3 and clear DB
 router.delete('/logo', authenticateToken, async (req, res) => {
   try {
     const business = await db.get('SELECT logo_path FROM businesses WHERE user_id = ?', [req.user.userId]);
-    if (business?.logo_path && fs.existsSync(business.logo_path)) {
-      fs.unlinkSync(business.logo_path);
+    if (business?.logo_path) {
+      try { await s3.deleteKey(business.logo_path); } catch {}
     }
     await db.run('UPDATE businesses SET logo_path = NULL WHERE user_id = ?', [req.user.userId]);
     res.json({ message: 'Logo removed' });
