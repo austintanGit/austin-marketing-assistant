@@ -3,7 +3,7 @@ const Joi = require('joi');
 const multer = require('multer');
 const sharp = require('sharp');
 const { authenticateToken } = require('./auth');
-const db = require('../database');
+const dynamodb = require('../services/dynamodb');
 const s3 = require('../services/s3');
 
 const router = express.Router();
@@ -50,46 +50,39 @@ router.post('/profile', authenticateToken, async (req, res) => {
     const businessData = { ...value, user_id: req.user.userId };
 
     // Check if business profile already exists
-    const existingBusiness = await db.get(
-      'SELECT id FROM businesses WHERE user_id = ?',
-      [req.user.userId]
-    );
-
+    const existingBusinesses = await dynamodb.getUserBusinesses(req.user.userId);
+    
     let result;
-    if (existingBusiness) {
-      // Update existing profile
-      const updateFields = Object.keys(businessData)
-        .filter(key => key !== 'user_id')
-        .map(key => `${key} = ?`)
-        .join(', ');
-      
-      const updateValues = Object.keys(businessData)
-        .filter(key => key !== 'user_id')
-        .map(key => businessData[key]);
-      
-      updateValues.push(req.user.userId);
-
-      await db.run(
-        `UPDATE businesses SET ${updateFields}, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`,
-        updateValues
+    if (existingBusinesses && existingBusinesses.length > 0) {
+      // Update existing business (for now, assume one business per user)
+      const existingBusiness = existingBusinesses[0];
+      const updatedBusiness = await dynamodb.update(
+        `USER#${req.user.userId}`,
+        `BUSINESS#${existingBusiness.id}`,
+        'SET business_name = :name, business_type = :type, address = :addr, phone = :phone, website = :website, description = :desc, target_audience = :audience, tone = :tone, updated_at = :updated',
+        {
+          ':name': value.business_name,
+          ':type': value.business_type,
+          ':addr': value.address,
+          ':phone': value.phone || null,
+          ':website': value.website || null,
+          ':desc': value.description,
+          ':audience': value.target_audience,
+          ':tone': value.tone || 'friendly',
+          ':updated': new Date().toISOString()
+        }
       );
       
       result = { id: existingBusiness.id };
     } else {
-      // Create new profile
-      const fields = Object.keys(businessData).join(', ');
-      const placeholders = Object.keys(businessData).map(() => '?').join(', ');
-      const values = Object.values(businessData);
-
-      result = await db.run(
-        `INSERT INTO businesses (${fields}) VALUES (${placeholders})`,
-        values
-      );
+      // Create new business
+      const newBusiness = await dynamodb.createBusiness(req.user.userId, value);
+      result = { id: newBusiness.id };
     }
 
     res.json({
-      message: existingBusiness ? 'Business profile updated' : 'Business profile created',
-      business_id: result.id || existingBusiness.id
+      message: existingBusinesses && existingBusinesses.length > 0 ? 'Business profile updated' : 'Business profile created',
+      business_id: result.id
     });
 
   } catch (error) {
@@ -101,15 +94,14 @@ router.post('/profile', authenticateToken, async (req, res) => {
 // Get business profile
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
-    const business = await db.get(
-      'SELECT * FROM businesses WHERE user_id = ?',
-      [req.user.userId]
-    );
-
-    if (!business) {
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    
+    if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: 'Business profile not found' });
     }
 
+    // Return the first business (assuming one business per user for now)
+    const business = businesses[0];
     res.json({ business });
 
   } catch (error) {
@@ -123,8 +115,13 @@ router.post('/logo', authenticateToken, logoUpload.single('logo'), async (req, r
   try {
     if (!req.file) return res.status(400).json({ error: 'No logo file provided' });
 
-    const business = await db.get('SELECT id, logo_path FROM businesses WHERE user_id = ?', [req.user.userId]);
-    if (!business) return res.status(404).json({ error: 'Business profile not found' });
+    // Get user's business profiles to find the first one (assuming single business per user for now)
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
+      return res.status(404).json({ error: 'Business profile not found' });
+    }
+    
+    const business = businesses[0]; // Use first business
 
     // Normalise to PNG, resize to max 240×240, preserve transparency
     const processedBuffer = await sharp(req.file.buffer)
@@ -142,10 +139,7 @@ router.post('/logo', authenticateToken, logoUpload.single('logo'), async (req, r
 
     // Store the S3 key (without CDN base) so we can delete/re-fetch it later
     const storedKey = s3.urlToKey(cdnUrl);
-    await db.run(
-      'UPDATE businesses SET logo_path = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?',
-      [storedKey, req.user.userId]
-    );
+    await dynamodb.updateBusinessLogo(req.user.userId, business.id, storedKey);
 
     res.json({ message: 'Logo uploaded successfully', logo_url: cdnUrl });
   } catch (err) {
@@ -157,8 +151,13 @@ router.post('/logo', authenticateToken, logoUpload.single('logo'), async (req, r
 // Returns the CDN URL of the logo (or 404 if none)
 router.get('/logo', authenticateToken, async (req, res) => {
   try {
-    const business = await db.get('SELECT logo_path FROM businesses WHERE user_id = ?', [req.user.userId]);
-    if (!business?.logo_path) {
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
+      return res.status(404).json({ error: 'Business profile not found' });
+    }
+    
+    const business = businesses[0]; // Use first business
+    if (!business.logo_path) {
       return res.status(404).json({ error: 'No logo uploaded' });
     }
     const logoUrl = s3.cdnUrl(business.logo_path);
@@ -172,11 +171,16 @@ router.get('/logo', authenticateToken, async (req, res) => {
 // Delete brand logo from S3 and clear DB
 router.delete('/logo', authenticateToken, async (req, res) => {
   try {
-    const business = await db.get('SELECT logo_path FROM businesses WHERE user_id = ?', [req.user.userId]);
-    if (business?.logo_path) {
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
+      return res.status(404).json({ error: 'Business profile not found' });
+    }
+    
+    const business = businesses[0]; // Use first business
+    if (business.logo_path) {
       try { await s3.deleteKey(business.logo_path); } catch {}
     }
-    await db.run('UPDATE businesses SET logo_path = NULL WHERE user_id = ?', [req.user.userId]);
+    await dynamodb.updateBusinessLogo(req.user.userId, business.id, null);
     res.json({ message: 'Logo removed' });
   } catch (err) {
     console.error('Delete logo error:', err);

@@ -21,16 +21,32 @@ export default function Setup() {
   const [logoFile, setLogoFile] = useState(null)
   const [logoPreview, setLogoPreview] = useState(null)
   const [logoUploading, setLogoUploading] = useState(false)
+  const [canSubmit, setCanSubmit] = useState(false) // New flag to control submission
   const logoInputRef = useRef(null)
   const navigate = useNavigate()
 
-  const { register, handleSubmit, formState: { errors }, watch } = useForm()
+  const { register, handleSubmit, formState: { errors }, watch } = useForm({
+    mode: 'onChange', // Only validate on change, not submit
+    shouldFocusError: false, // Prevent auto-focus which might trigger submission
+  })
 
   useEffect(() => {
+    console.log('Setup component mounted, loading business types...');
     api.get('/business/types')
-      .then(response => setBusinessTypes(response.data.business_types))
-      .catch(err => console.error('Failed to load business types:', err))
+      .then(response => {
+        console.log('Business types loaded successfully');
+        setBusinessTypes(response.data.business_types);
+      })
+      .catch(err => {
+        console.error('Failed to load business types:', err);
+        // Don't let this error affect the form
+      })
   }, [])
+
+  // Debug current step changes
+  useEffect(() => {
+    console.log(`Current step changed to: ${currentStep}`);
+  }, [currentStep])
 
   const handleLogoChange = (e) => {
     const file = e.target.files[0]
@@ -42,33 +58,77 @@ export default function Setup() {
   }
 
   const onSubmit = async (data) => {
+    // STRICT: Only allow submission when explicitly triggered
+    if (currentStep < 5) {
+      console.log(`❌ Form submission blocked - not on final step (current: ${currentStep})`);
+      return;
+    }
+    
+    if (!canSubmit) {
+      console.log(`❌ Form submission blocked - canSubmit flag is false`);
+      return;
+    }
+    
+    console.log('✅ Starting onboarding submission from step 5...');
     setLoading(true)
+    setCanSubmit(false) // Prevent double submission
+    
     try {
+      console.log('Creating business profile...');
       await api.post('/business/profile', data)
+      console.log('Business profile created successfully');
 
       // Upload logo if provided
       if (logoFile) {
+        console.log('Uploading logo file...', logoFile.name);
         setLogoUploading(true)
         const formData = new FormData()
         formData.append('logo', logoFile)
-        await api.post('/business/logo', formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        })
+        
+        try {
+          await api.post('/business/logo', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+          })
+          console.log('Logo uploaded successfully');
+        } catch (logoError) {
+          console.error('Logo upload failed (but continuing):', logoError);
+          // Don't fail the entire onboarding if logo upload fails
+        }
         setLogoUploading(false)
+      } else {
+        console.log('No logo file to upload');
       }
 
       toast.success('Business profile created!')
+      console.log('Redirecting to dashboard...');
       navigate('/dashboard')
     } catch (error) {
+      console.error('Onboarding error:', error);
       toast.error(error.response?.data?.error || 'Failed to save profile')
     } finally {
       setLoading(false)
       setLogoUploading(false)
+      setCanSubmit(false) // Reset flag
     }
   }
 
-  const nextStep = () => setCurrentStep(prev => Math.min(prev + 1, 5))
-  const prevStep = () => setCurrentStep(prev => Math.max(prev - 1, 1))
+  const nextStep = () => {
+    console.log(`Attempting to move from step ${currentStep} to ${currentStep + 1}`);
+    if (currentStep >= 5) {
+      console.log('Already on final step, not advancing');
+      return;
+    }
+    const newStep = Math.min(currentStep + 1, 5);
+    console.log(`Moving to step ${newStep}`);
+    setCurrentStep(newStep);
+  }
+  
+  const prevStep = () => {
+    console.log(`Moving from step ${currentStep} to ${currentStep - 1}`);
+    const newStep = Math.max(currentStep - 1, 1);
+    console.log(`Moving to step ${newStep}`);
+    setCurrentStep(newStep);
+  }
 
   const steps = [
     { number: 1, title: 'Business Info', icon: BuildingStorefrontIcon },
@@ -117,8 +177,22 @@ export default function Setup() {
 
         {/* Form */}
         <div className="bg-white rounded-lg shadow-lg p-8">
-          <form onSubmit={handleSubmit(onSubmit)}>
-            
+          <form 
+            onSubmit={(e) => {
+              if (currentStep < 5 || !canSubmit) {
+                e.preventDefault();
+                console.log('🚫 Form submission prevented - conditions not met');
+                return;
+              }
+              handleSubmit(onSubmit)(e);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && currentStep < 5) {
+                e.preventDefault();
+                console.log('Enter key blocked - not on final step');
+              }
+            }}
+          >
             {/* Step 1: Business Info */}
             {currentStep === 1 && (
               <div className="space-y-6">
@@ -329,11 +403,14 @@ export default function Setup() {
             {/* Step 5: Brand Logo */}
             {currentStep === 5 && (
               <div className="space-y-6">
-                <div>
-                  <h2 className="text-2xl font-semibold text-gray-900 mb-1">
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
+                  <h2 className="text-2xl font-semibold text-green-800 mb-1 flex items-center">
+                    <span className="bg-green-100 text-green-800 text-sm font-medium px-3 py-1 rounded-full mr-3">
+                      STEP 5 of 5
+                    </span>
                     Upload Your Brand Logo
                   </h2>
-                  <p className="text-gray-500 text-sm">Optional — you can add or change this later from your dashboard.</p>
+                  <p className="text-green-700 text-sm">Optional — you can add or change this later from your dashboard.</p>
                 </div>
 
                 <div
@@ -379,6 +456,14 @@ export default function Setup() {
                     🎨 When you generate AI images for Facebook posts, you'll be able to automatically stamp your logo in the corner.
                   </p>
                 </div>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <p className="text-sm text-blue-700 font-medium">
+                    ⏱️ Take your time! This step won't auto-submit. 
+                    <br />
+                    Click "Complete Setup" below when you're ready to finish.
+                  </p>
+                </div>
               </div>
             )}
 
@@ -404,6 +489,10 @@ export default function Setup() {
               ) : (
                 <button
                   type="submit"
+                  onClick={() => {
+                    console.log('🔓 Complete Setup clicked - enabling submission');
+                    setCanSubmit(true);
+                  }}
                   disabled={loading || logoUploading}
                   className="austin-button disabled:opacity-50 disabled:cursor-not-allowed"
                 >

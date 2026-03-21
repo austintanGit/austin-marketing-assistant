@@ -1,7 +1,7 @@
 const express = require('express');
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const { authenticateToken } = require('./auth');
-const db = require('../database');
+const dynamodb = require('../services/dynamodb');
 
 const router = express.Router();
 
@@ -29,7 +29,7 @@ async function getOrCreatePrice(planKey) {
     currency: 'usd',
     unit_amount: plan.amount,
     recurring: { interval: 'month' },
-    product_data: { name: `Austin Marketing Assistant - ${plan.name}`, description: plan.description },
+    product_data: { name: `Austin Marketing Assistant - ${plan.name}` },
     lookup_key: plan.lookup_key,
   });
 }
@@ -46,14 +46,11 @@ router.post('/create-checkout-session', authenticateToken, async (req, res) => {
     const { plan = 'basic' } = req.body;
     if (!PLANS[plan]) return res.status(400).json({ error: 'Invalid plan' });
 
-    const user = await db.get('SELECT * FROM users WHERE id = ?', [req.user.userId]);
+    const user = await dynamodb.getUserById(req.user.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
 
-    const existingSubscription = await db.get(
-      'SELECT * FROM subscriptions WHERE user_id = ? AND status = "active"',
-      [req.user.userId]
-    );
-    if (existingSubscription) {
+    const existingSubscription = await dynamodb.getUserSubscription(req.user.userId);
+    if (existingSubscription && existingSubscription.status === 'active') {
       return res.status(400).json({ error: 'User already has an active subscription' });
     }
 
@@ -102,20 +99,15 @@ router.post('/success', authenticateToken, async (req, res) => {
       const subscription = await stripe.subscriptions.retrieve(session.subscription);
       const plan = planFromAmount(subscription.items.data[0]?.price?.unit_amount || 0);
 
-      await db.run(
-        `INSERT OR REPLACE INTO subscriptions
-         (user_id, stripe_customer_id, stripe_subscription_id, plan, status,
-          cancel_at_period_end, current_period_start, current_period_end, updated_at)
-         VALUES (?, ?, ?, ?, 'active', 0, ?, ?, CURRENT_TIMESTAMP)`,
-        [
-          req.user.userId,
-          subscription.customer,
-          subscription.id,
-          plan,
-          new Date(subscription.current_period_start * 1000).toISOString(),
-          new Date(subscription.current_period_end * 1000).toISOString(),
-        ]
-      );
+      await dynamodb.createOrUpdateSubscription(req.user.userId, {
+        stripe_customer_id: subscription.customer,
+        stripe_subscription_id: subscription.id,
+        plan: plan,
+        status: 'active',
+        cancel_at_period_end: false,
+        current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
+        current_period_end: new Date(subscription.current_period_end * 1000).toISOString()
+      });
 
       res.json({
         message: 'Subscription activated successfully!',
@@ -139,10 +131,7 @@ router.post('/success', authenticateToken, async (req, res) => {
 
 router.get('/subscription', authenticateToken, async (req, res) => {
   try {
-    let subscription = await db.get(
-      'SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
-      [req.user.userId]
-    );
+    let subscription = await dynamodb.getUserSubscription(req.user.userId);
 
     if (!subscription) {
       return res.json({ subscription: null, has_active_subscription: false });
@@ -155,23 +144,16 @@ router.get('/subscription', authenticateToken, async (req, res) => {
         const stripeSub = await stripe.subscriptions.retrieve(subscription.stripe_subscription_id);
         const plan = planFromAmount(stripeSub.items.data[0]?.price?.unit_amount || 0);
 
-        await db.run(
-          `UPDATE subscriptions
-           SET status = ?, plan = ?, cancel_at_period_end = ?,
-               current_period_start = ?, current_period_end = ?, updated_at = CURRENT_TIMESTAMP
-           WHERE id = ?`,
-          [
-            stripeSub.status,
-            plan,
-            stripeSub.cancel_at_period_end ? 1 : 0,
-            new Date(stripeSub.current_period_start * 1000).toISOString(),
-            new Date(stripeSub.current_period_end * 1000).toISOString(),
-            subscription.id,
-          ]
-        );
+        await dynamodb.updateSubscription(req.user.userId, {
+          status: stripeSub.status,
+          plan: plan,
+          cancel_at_period_end: stripeSub.cancel_at_period_end,
+          current_period_start: new Date(stripeSub.current_period_start * 1000).toISOString(),
+          current_period_end: new Date(stripeSub.current_period_end * 1000).toISOString()
+        });
 
         // Re-fetch the updated row
-        subscription = await db.get('SELECT * FROM subscriptions WHERE id = ?', [subscription.id]);
+        subscription = await dynamodb.getUserSubscription(req.user.userId);
       } catch (stripeErr) {
         // If Stripe is unreachable, fall back to DB data rather than failing the request
         console.error('Stripe sync error (using cached DB state):', stripeErr.message);
@@ -200,11 +182,8 @@ router.get('/subscription', authenticateToken, async (req, res) => {
 
 router.post('/cancel-subscription', authenticateToken, async (req, res) => {
   try {
-    const subscription = await db.get(
-      'SELECT * FROM subscriptions WHERE user_id = ? AND status = "active"',
-      [req.user.userId]
-    );
-    if (!subscription) return res.status(404).json({ error: 'No active subscription found' });
+    const subscription = await dynamodb.getUserSubscription(req.user.userId);
+    if (!subscription || subscription.status !== 'active') return res.status(404).json({ error: 'No active subscription found' });
     if (subscription.cancel_at_period_end) {
       return res.status(400).json({ error: 'Subscription is already set to cancel' });
     }
@@ -213,10 +192,9 @@ router.post('/cancel-subscription', authenticateToken, async (req, res) => {
       cancel_at_period_end: true,
     });
 
-    await db.run(
-      'UPDATE subscriptions SET cancel_at_period_end = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [subscription.id]
-    );
+    await dynamodb.updateSubscription(req.user.userId, {
+      cancel_at_period_end: true
+    });
 
     res.json({
       message: 'Subscription will be cancelled at the end of the current billing period',
@@ -232,20 +210,18 @@ router.post('/cancel-subscription', authenticateToken, async (req, res) => {
 
 router.post('/reactivate-subscription', authenticateToken, async (req, res) => {
   try {
-    const subscription = await db.get(
-      'SELECT * FROM subscriptions WHERE user_id = ? AND status = "active" AND cancel_at_period_end = 1',
-      [req.user.userId]
-    );
-    if (!subscription) return res.status(404).json({ error: 'No cancelling subscription found' });
+    const subscription = await dynamodb.getUserSubscription(req.user.userId);
+    if (!subscription || subscription.status !== 'active' || !subscription.cancel_at_period_end) {
+      return res.status(404).json({ error: 'No cancelling subscription found' });
+    }
 
     await stripe.subscriptions.update(subscription.stripe_subscription_id, {
       cancel_at_period_end: false,
     });
 
-    await db.run(
-      'UPDATE subscriptions SET cancel_at_period_end = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [subscription.id]
-    );
+    await dynamodb.updateSubscription(req.user.userId, {
+      cancel_at_period_end: false
+    });
 
     res.json({ message: 'Subscription reactivated — you will continue to be billed monthly' });
   } catch (error) {
@@ -258,11 +234,8 @@ router.post('/reactivate-subscription', authenticateToken, async (req, res) => {
 
 router.post('/upgrade-subscription', authenticateToken, async (req, res) => {
   try {
-    const subscription = await db.get(
-      'SELECT * FROM subscriptions WHERE user_id = ? AND status = "active"',
-      [req.user.userId]
-    );
-    if (!subscription) return res.status(404).json({ error: 'No active subscription found' });
+    const subscription = await dynamodb.getUserSubscription(req.user.userId);
+    if (!subscription || subscription.status !== 'active') return res.status(404).json({ error: 'No active subscription found' });
     if (subscription.plan === 'pro') return res.status(400).json({ error: 'Already on the Pro plan' });
 
     const proPrice = await getOrCreatePrice('pro');
@@ -274,10 +247,10 @@ router.post('/upgrade-subscription', authenticateToken, async (req, res) => {
       items: [{ id: stripeSub.items.data[0].id, price: proPrice.id }],
     });
 
-    await db.run(
-      'UPDATE subscriptions SET plan = "pro", cancel_at_period_end = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [subscription.id]
-    );
+    await dynamodb.updateSubscription(req.user.userId, {
+      plan: 'pro',
+      cancel_at_period_end: false
+    });
 
     res.json({ message: 'Upgraded to Pro plan! Prorated charges applied.' });
   } catch (error) {
@@ -290,10 +263,7 @@ router.post('/upgrade-subscription', authenticateToken, async (req, res) => {
 
 router.post('/create-portal-session', authenticateToken, async (req, res) => {
   try {
-    const subscription = await db.get(
-      'SELECT * FROM subscriptions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1',
-      [req.user.userId]
-    );
+    const subscription = await dynamodb.getUserSubscription(req.user.userId);
     if (!subscription?.stripe_customer_id) {
       return res.status(404).json({ error: 'No subscription found' });
     }
@@ -332,19 +302,13 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         if (invoice.subscription) {
           const sub = await stripe.subscriptions.retrieve(invoice.subscription);
           const plan = planFromAmount(sub.items.data[0]?.price?.unit_amount || 0);
-          await db.run(
-            `UPDATE subscriptions
-             SET status = 'active', plan = ?, cancel_at_period_end = ?,
-                 current_period_start = ?, current_period_end = ?, updated_at = CURRENT_TIMESTAMP
-             WHERE stripe_subscription_id = ?`,
-            [
-              plan,
-              sub.cancel_at_period_end ? 1 : 0,
-              new Date(sub.current_period_start * 1000).toISOString(),
-              new Date(sub.current_period_end * 1000).toISOString(),
-              invoice.subscription,
-            ]
-          );
+          await dynamodb.updateSubscriptionByStripeId(invoice.subscription, {
+            status: 'active',
+            plan: plan,
+            cancel_at_period_end: sub.cancel_at_period_end,
+            current_period_start: new Date(sub.current_period_start * 1000).toISOString(),
+            current_period_end: new Date(sub.current_period_end * 1000).toISOString()
+          });
           console.log(`Payment succeeded — subscription renewed: ${invoice.subscription}`);
         }
         break;
@@ -353,11 +317,9 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       case 'invoice.payment_failed': {
         const failedInvoice = event.data.object;
         if (failedInvoice.subscription) {
-          await db.run(
-            `UPDATE subscriptions SET status = 'past_due', updated_at = CURRENT_TIMESTAMP
-             WHERE stripe_subscription_id = ?`,
-            [failedInvoice.subscription]
-          );
+          await dynamodb.updateSubscriptionByStripeId(failedInvoice.subscription, {
+            status: 'past_due'
+          });
           console.log(`Payment failed — subscription past due: ${failedInvoice.subscription}`);
         }
         break;
@@ -366,31 +328,23 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       case 'customer.subscription.updated': {
         const updatedSub = event.data.object;
         const plan = planFromAmount(updatedSub.items.data[0]?.price?.unit_amount || 0);
-        await db.run(
-          `UPDATE subscriptions
-           SET status = ?, plan = ?, cancel_at_period_end = ?,
-               current_period_start = ?, current_period_end = ?, updated_at = CURRENT_TIMESTAMP
-           WHERE stripe_subscription_id = ?`,
-          [
-            updatedSub.status,
-            plan,
-            updatedSub.cancel_at_period_end ? 1 : 0,
-            new Date(updatedSub.current_period_start * 1000).toISOString(),
-            new Date(updatedSub.current_period_end * 1000).toISOString(),
-            updatedSub.id,
-          ]
-        );
+        await dynamodb.updateSubscriptionByStripeId(updatedSub.id, {
+          status: updatedSub.status,
+          plan: plan,
+          cancel_at_period_end: updatedSub.cancel_at_period_end,
+          current_period_start: new Date(updatedSub.current_period_start * 1000).toISOString(),
+          current_period_end: new Date(updatedSub.current_period_end * 1000).toISOString()
+        });
         console.log(`Subscription updated: ${updatedSub.id} → plan=${plan}, cancel_at_period_end=${updatedSub.cancel_at_period_end}`);
         break;
       }
 
       case 'customer.subscription.deleted': {
         const deletedSub = event.data.object;
-        await db.run(
-          `UPDATE subscriptions SET status = 'cancelled', cancel_at_period_end = 0, updated_at = CURRENT_TIMESTAMP
-           WHERE stripe_subscription_id = ?`,
-          [deletedSub.id]
-        );
+        await dynamodb.updateSubscriptionByStripeId(deletedSub.id, {
+          status: 'cancelled',
+          cancel_at_period_end: false
+        });
         console.log(`Subscription cancelled: ${deletedSub.id}`);
         break;
       }

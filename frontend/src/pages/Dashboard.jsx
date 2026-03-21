@@ -70,9 +70,21 @@ export default function Dashboard() {
       setConnections(connectionsRes.data.connections || {})
       setFbPosts(fbPostsRes.data.posts || [])
       if (biz) {
+        // Check for logo existence - 404 is expected if no logo
         api.get('/business/logo', { responseType: 'blob' })
-          .then(() => setHasLogo(true))
-          .catch(() => setHasLogo(false))
+          .then(() => {
+            console.log('Logo found');
+            setHasLogo(true);
+          })
+          .catch((error) => {
+            if (error.response?.status === 404) {
+              console.log('No logo uploaded yet');
+              setHasLogo(false);
+            } else {
+              console.error('Logo check failed:', error);
+              setHasLogo(false);
+            }
+          })
       }
     } catch (error) {
       console.error('Failed to load dashboard data:', error)
@@ -176,6 +188,61 @@ export default function Dashboard() {
   const facebookConnected = !!connections.facebook
   const planLabel = subscription?.plan === 'pro' ? 'Pro' : hasActiveSubscription ? 'Basic' : 'Free'
 
+  // Helper functions for AI Tools stat
+  const getActiveToolsCount = () => {
+    const tools = [];
+    
+    // Email generation (available if user has a subscription)
+    if (hasActiveSubscription) {
+      tools.push('email');
+    }
+    
+    // Facebook tools (available if Facebook is connected)
+    if (facebookConnected) {
+      tools.push('facebook_post', 'facebook_caption', 'facebook_image');
+    }
+    
+    // Content generation (available if user has business profile)
+    if (business?.id) {
+      tools.push('content_generation');
+    }
+    
+    return tools.length > 0 ? `${tools.length} active` : '0 active';
+  };
+
+  const getActiveToolsText = () => {
+    const activeTools = [];
+    
+    if (hasActiveSubscription) {
+      activeTools.push('Email');
+    }
+    
+    if (facebookConnected) {
+      activeTools.push('Facebook');
+    }
+    
+    if (business?.id && !activeTools.includes('Email')) {
+      activeTools.push('Content');
+    }
+    
+    if (activeTools.length === 0) {
+      return 'Set up your first tool';
+    }
+    
+    return activeTools.join(' · ');
+  };
+
+  const getActiveToolsProgress = () => {
+    const maxTools = 5; // Email, Facebook (3 features), Content
+    let activeCount = 0;
+    
+    if (hasActiveSubscription) activeCount += 1; // Email
+    if (facebookConnected) activeCount += 3; // Facebook tools
+    if (business?.id) activeCount += 1; // Content generation
+    
+    return Math.round((activeCount / maxTools) * 100);
+  };
+
   // Progress bars (visual, not real metrics)
   const postProgress = Math.min(100, Math.round((fbPosts.length / 30) * 100))
 
@@ -276,9 +343,9 @@ export default function Dashboard() {
         />
         <StatCard
           label="AI Tools"
-          value="2 active"
-          sub="Email · Facebook"
-          progress={65}
+          value={getActiveToolsCount()}
+          sub={getActiveToolsText()}
+          progress={getActiveToolsProgress()}
           progressColor="bg-orange-400"
           icon={<SparklesIcon className="h-5 w-5" />}
           iconBg="bg-orange-100 text-orange-500"

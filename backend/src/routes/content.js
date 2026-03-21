@@ -1,6 +1,6 @@
 const express = require('express');
 const { authenticateToken } = require('./auth');
-const db = require('../database');
+const dynamodb = require('../services/dynamodb');
 const bedrockService = require('../services/bedrock');
 
 const router = express.Router();
@@ -11,26 +11,20 @@ const CONTENT_GENERATE_MONTHLY_LIMIT = 5;
 router.post('/generate', authenticateToken, async (req, res) => {
   try {
     // Check monthly generation limit
-    const usageRow = await db.get(
-      `SELECT COUNT(*) as count FROM content_generate_log
-       WHERE user_id = ? AND strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', 'localtime')`,
-      [req.user.userId]
-    );
-    if ((usageRow?.count || 0) >= CONTENT_GENERATE_MONTHLY_LIMIT) {
+    const usageCount = await dynamodb.getMonthlyUsageCount(req.user.userId, 'content_generate');
+    if (usageCount >= CONTENT_GENERATE_MONTHLY_LIMIT) {
       return res.status(429).json({
         error: `Monthly content generation limit reached (${CONTENT_GENERATE_MONTHLY_LIMIT}/month). Resets on the 1st.`,
       });
     }
 
     // Get business profile
-    const business = await db.get(
-      'SELECT * FROM businesses WHERE user_id = ?',
-      [req.user.userId]
-    );
-
-    if (!business) {
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: 'Business profile not found. Please complete setup first.' });
     }
+    
+    const business = businesses[0]; // Use first business
 
     console.log(`🤖 Generating content for ${business.business_name}...`);
 
@@ -51,12 +45,12 @@ router.post('/generate', authenticateToken, async (req, res) => {
     // Store in database
     await storeGeneratedContent(business.id, parsedContent);
 
-    // Log usage
-    await db.run('INSERT INTO content_generate_log (user_id) VALUES (?)', [req.user.userId]);
-
     console.log(`✅ Content generation complete for ${business.business_name}`);
 
-    const usedAfter = (usageRow?.count || 0) + 1;
+    // Log usage
+    await dynamodb.incrementUsageLog(req.user.userId, 'content_generate');
+
+    const usedAfter = usageCount + 1;
     res.json({
       message: 'Content generated successfully!',
       content: parsedContent,
@@ -78,12 +72,7 @@ const EMAIL_DAILY_LIMIT = 10;
 // ─── GET /api/content/email-quota ────────────────────────────────────────────
 router.get('/email-quota', authenticateToken, async (req, res) => {
   try {
-    const row = await db.get(
-      `SELECT COUNT(*) as count FROM email_write_log
-       WHERE user_id = ? AND date(created_at) = date('now', 'localtime')`,
-      [req.user.userId]
-    );
-    const used = row?.count || 0;
+    const used = await dynamodb.getDailyUsageCount(req.user.userId, 'email_write');
     const remaining = Math.max(0, EMAIL_DAILY_LIMIT - used);
     res.json({ used, limit: EMAIL_DAILY_LIMIT, remaining, can_write: remaining > 0 });
   } catch (error) {
@@ -101,21 +90,19 @@ router.post('/write-email', authenticateToken, async (req, res) => {
     }
 
     // Check daily limit
-    const usageRow = await db.get(
-      `SELECT COUNT(*) as count FROM email_write_log
-       WHERE user_id = ? AND date(created_at) = date('now', 'localtime')`,
-      [req.user.userId]
-    );
-    if ((usageRow?.count || 0) >= EMAIL_DAILY_LIMIT) {
+    const usageCount = await dynamodb.getDailyUsageCount(req.user.userId, 'email_write');
+    if (usageCount >= EMAIL_DAILY_LIMIT) {
       return res.status(429).json({
         error: `Daily email write limit reached (${EMAIL_DAILY_LIMIT}/day). Resets at midnight.`,
       });
     }
 
-    const business = await db.get('SELECT * FROM businesses WHERE user_id = ?', [req.user.userId]);
-    if (!business) {
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: 'Business profile not found. Please complete setup first.' });
     }
+    
+    const business = businesses[0]; // Use first business
 
     const aiPrompt = `You are an email marketing expert for a local Austin business.
 
@@ -150,9 +137,9 @@ BODY:
     const body = bodyMatch ? bodyMatch[1].trim() : raw.trim();
 
     // Log successful generation
-    await db.run('INSERT INTO email_write_log (user_id) VALUES (?)', [req.user.userId]);
+    await dynamodb.incrementUsageLog(req.user.userId, 'email_write');
 
-    const usedAfter = (usageRow?.count || 0) + 1;
+    const usedAfter = usageCount + 1;
     res.json({
       subject,
       body,
@@ -167,22 +154,14 @@ BODY:
 // Get previously generated content
 router.get('/history', authenticateToken, async (req, res) => {
   try {
-    const business = await db.get(
-      'SELECT id FROM businesses WHERE user_id = ?',
-      [req.user.userId]
-    );
-
-    if (!business) {
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
       return res.status(404).json({ error: 'Business profile not found' });
     }
 
-    const content = await db.query(
-      `SELECT * FROM generated_content 
-       WHERE business_id = ? 
-       ORDER BY created_at DESC 
-       LIMIT 100`,
-      [business.id]
-    );
+    const business = businesses[0]; // Use first business
+
+    const content = await dynamodb.getBusinessContent(business.id);
 
     // Group content by type
     const groupedContent = {
@@ -206,42 +185,23 @@ router.patch('/content/:contentId', authenticateToken, async (req, res) => {
     const { status, content } = req.body;
 
     // Verify ownership
-    const business = await db.get(
-      'SELECT id FROM businesses WHERE user_id = ?',
-      [req.user.userId]
-    );
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    if (!businesses || businesses.length === 0) {
+      return res.status(404).json({ error: 'Business profile not found' });
+    }
+
+    const business = businesses[0]; // Use first business
 
     if (!business) {
       return res.status(404).json({ error: 'Business not found' });
     }
 
     // Update content
-    const updateFields = [];
-    const updateValues = [];
+    const updateData = {};
+    if (status) updateData.status = status;
+    if (content) updateData.content = content;
 
-    if (status) {
-      updateFields.push('status = ?');
-      updateValues.push(status);
-    }
-
-    if (content) {
-      updateFields.push('content = ?');
-      updateValues.push(content);
-    }
-
-    updateValues.push(contentId);
-    updateValues.push(business.id);
-
-    const result = await db.run(
-      `UPDATE generated_content 
-       SET ${updateFields.join(', ')}, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = ? AND business_id = ?`,
-      updateValues
-    );
-
-    if (result.changes === 0) {
-      return res.status(404).json({ error: 'Content not found' });
-    }
+    const result = await dynamodb.updateContent(business.id, contentId, updateData);
 
     res.json({ message: 'Content updated successfully' });
 
@@ -332,12 +292,13 @@ async function storeGeneratedContent(businessId, content) {
   ];
 
   for (const item of allContent) {
-    await db.run(
-      `INSERT INTO generated_content 
-       (business_id, content_type, title, content, platform, status)
-       VALUES (?, ?, ?, ?, ?, 'draft')`,
-      [businessId, item.type, item.title || null, item.content, item.platform]
-    );
+    await dynamodb.createContent(businessId, {
+      content_type: item.type,
+      title: item.title || null,
+      content: item.content,
+      platform: item.platform || null,
+      status: 'draft'
+    });
   }
 }
 

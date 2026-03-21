@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
-const db = require('../database');
+const dynamodb = require('../services/dynamodb');
 
 const router = express.Router();
 
@@ -29,7 +29,7 @@ router.post('/register', async (req, res) => {
     const { email, password } = value;
 
     // Check if user already exists
-    const existingUser = await db.get('SELECT id FROM users WHERE email = ?', [email]);
+    const existingUser = await dynamodb.getUserByEmail(email);
     if (existingUser) {
       return res.status(400).json({ error: 'User already exists with this email' });
     }
@@ -38,11 +38,8 @@ router.post('/register', async (req, res) => {
     const saltRounds = 12;
     const passwordHash = await bcrypt.hash(password, saltRounds);
 
-    // Create user
-    const result = await db.run(
-      'INSERT INTO users (email, password_hash) VALUES (?, ?)',
-      [email, passwordHash]
-    );
+    // Create user using DynamoDB
+    const result = await dynamodb.createUser(email, passwordHash);
 
     // Generate JWT token
     const token = jwt.sign(
@@ -59,6 +56,12 @@ router.post('/register', async (req, res) => {
 
   } catch (error) {
     console.error('Registration error:', error);
+    
+    // Handle DynamoDB specific errors
+    if (error.name === 'ConditionalCheckFailedException') {
+      return res.status(400).json({ error: 'User already exists with this email' });
+    }
+    
     res.status(500).json({ error: 'Failed to create user' });
   }
 });
@@ -74,8 +77,8 @@ router.post('/login', async (req, res) => {
 
     const { email, password } = value;
 
-    // Find user
-    const user = await db.get('SELECT id, email, password_hash FROM users WHERE email = ?', [email]);
+    // Find user using DynamoDB
+    const user = await dynamodb.getUserByEmail(email);
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
@@ -126,11 +129,19 @@ const authenticateToken = (req, res, next) => {
 // Get current user profile
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const user = await db.get('SELECT id, email, created_at FROM users WHERE id = ?', [req.user.userId]);
+    const user = await dynamodb.getUserById(req.user.userId);
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json({ user });
+    
+    res.json({ 
+      user: { 
+        id: user.id, 
+        email: user.email, 
+        created_at: user.created_at,
+        extra_image_credits: user.extra_image_credits 
+      } 
+    });
   } catch (error) {
     console.error('Get profile error:', error);
     res.status(500).json({ error: 'Failed to get user profile' });
