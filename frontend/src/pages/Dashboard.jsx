@@ -110,9 +110,12 @@ export default function Dashboard() {
     }
   }
 
-  const startSubscription = async (plan = 'basic') => {
+  const startSubscription = async (plan = 'basic', billingCycle = 'monthly') => {
     try {
-      const response = await api.post('/payments/create-checkout-session', { plan })
+      const response = await api.post('/payments/create-checkout-session', { 
+        plan, 
+        billingCycle 
+      })
       window.location.href = response.data.checkout_url
     } catch (error) {
       toast.error('Failed to start subscription process')
@@ -186,7 +189,8 @@ export default function Dashboard() {
 
   const hasActiveSubscription = subscription?.is_active
   const facebookConnected = !!connections.facebook
-  const planLabel = subscription?.plan === 'pro' ? 'Pro' : hasActiveSubscription ? 'Basic' : 'Free'
+  const isTrial = subscription?.plan === 'trial'
+  const planLabel = subscription?.plan === 'pro' ? 'Pro' : subscription?.plan === 'trial' ? 'Trial' : hasActiveSubscription ? 'Basic' : 'Free'
 
   // Helper functions for AI Tools stat
   const getActiveToolsCount = () => {
@@ -482,6 +486,8 @@ function ActionCard({ bg, icon, iconBg, title, description, action, onClick, hre
 
 function SubscriptionCard({ subscription, onCancel, onReactivate, onUpgrade, onManage }) {
   const isPro = subscription.plan === 'pro'
+  const isTrial = subscription.plan === 'trial'
+  const isAnnual = subscription.billing_cycle === 'annual'
   const isCancelling = !!subscription.cancel_at_period_end
   const isPastDue = subscription.status === 'past_due'
   const isCancelled = subscription.status === 'cancelled'
@@ -489,6 +495,23 @@ function SubscriptionCard({ subscription, onCancel, onReactivate, onUpgrade, onM
   const periodEnd = subscription.current_period_end
     ? new Date(subscription.current_period_end).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
     : null
+
+  // Calculate pricing based on plan and billing cycle
+  let pricing = '$39'
+  let pricingSuffix = '/mo'
+  
+  if (isTrial) {
+    pricing = 'FREE'
+    pricingSuffix = ' TRIAL'
+  } else if (isPro) {
+    pricing = isAnnual ? '$53' : '$79'
+  } else {
+    pricing = isAnnual ? '$26' : '$39'
+  }
+  
+  if (!isTrial && isAnnual) {
+    pricingSuffix = '/mo'
+  }
 
   let statusBg = 'bg-green-100 text-green-700'
   let statusLabel = 'Active'
@@ -498,11 +521,27 @@ function SubscriptionCard({ subscription, onCancel, onReactivate, onUpgrade, onM
 
   return (
     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden h-full flex flex-col">
-      <div className={`px-5 py-5 ${isPro ? 'bg-gradient-to-br from-purple-600 to-purple-400' : 'bg-gradient-to-br from-[#111827] to-[#1e3a5f]'}`}>
-        <p className={`text-xs font-semibold uppercase tracking-widest ${isPro ? 'text-purple-200' : 'text-blue-300'} mb-1`}>Subscription</p>
+      <div className={`px-5 py-5 ${isTrial ? 'bg-gradient-to-br from-blue-600 to-blue-400' : isPro ? 'bg-gradient-to-br from-purple-600 to-purple-400' : 'bg-gradient-to-br from-[#111827] to-[#1e3a5f]'}`}>
+        <p className={`text-xs font-semibold uppercase tracking-widest ${isTrial ? 'text-blue-200' : isPro ? 'text-purple-200' : 'text-blue-300'} mb-1`}>
+          {isTrial ? 'Free Trial' : 'Subscription'}
+        </p>
         <div className="flex items-end justify-between">
-          <p className="text-white font-bold text-xl">{isPro ? 'Pro Plan' : 'Basic Plan'}</p>
-          <p className="text-white font-bold text-2xl">{isPro ? '$79' : '$39'}<span className="text-sm font-normal opacity-60">/mo</span></p>
+          <div>
+            <p className="text-white font-bold text-xl">
+              {isTrial ? '7-Day Trial' : isPro ? 'Pro Plan' : 'Basic Plan'}
+            </p>
+            {isAnnual && !isTrial && (
+              <p className="text-xs text-white opacity-75">
+                Annual - Save {isPro ? '33%' : '20%'}!
+              </p>
+            )}
+            {isTrial && (
+              <p className="text-xs text-white opacity-75">
+                Ends {periodEnd}
+              </p>
+            )}
+          </div>
+          <p className="text-white font-bold text-2xl">{pricing}<span className="text-sm font-normal opacity-60">{pricingSuffix}</span></p>
         </div>
       </div>
 

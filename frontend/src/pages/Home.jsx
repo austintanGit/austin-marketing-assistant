@@ -18,7 +18,7 @@ export default function Home() {
               AI-Powered Marketing for <span className="text-yellow-300">Austin</span> Small Businesses
             </h1>
             <p className="text-xl mb-8 max-w-3xl mx-auto">
-              Get 30 days of social media posts, Google My Business updates, and email content 
+              Get 30 days of social media posts and custom email content 
               specifically crafted for your Austin business. Setup takes just 5 minutes.
             </p>
             <div className="flex justify-center space-x-4">
@@ -69,7 +69,7 @@ export default function Home() {
               <MapPinIcon className="h-12 w-12 text-austin-blue mx-auto mb-4" />
               <h3 className="text-xl font-semibold mb-3">Local SEO Focused</h3>
               <p className="text-gray-600">
-                Google My Business posts optimized for Austin searches. 
+                Social media content optimized for Austin searches. 
                 Help locals find your business.
               </p>
             </div>
@@ -93,11 +93,7 @@ export default function Home() {
                 </li>
                 <li className="flex items-center">
                   <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />
-                  <span><strong>8 Google My Business Posts</strong> for local SEO</span>
-                </li>
-                <li className="flex items-center">
-                  <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />
-                  <span><strong>4 Email Newsletter Templates</strong> for customers</span>
+                  <span><strong>Custom Email Writing</strong> for customer outreach</span>
                 </li>
                 <li className="flex items-center">
                   <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />

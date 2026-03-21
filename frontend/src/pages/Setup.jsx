@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useForm } from 'react-hook-form'
 import toast from 'react-hot-toast'
 import api from '../services/api'
@@ -24,6 +24,13 @@ export default function Setup() {
   const [canSubmit, setCanSubmit] = useState(false) // New flag to control submission
   const logoInputRef = useRef(null)
   const navigate = useNavigate()
+  const location = useLocation()
+  
+  // Get plan information from registration
+  const selectedPlan = location.state?.plan || 'basic'
+  const selectedBillingCycle = location.state?.billingCycle || 'monthly'
+  const requiresPayment = location.state?.requiresPayment || false
+  const isTrial = selectedPlan === 'trial'
 
   const { register, handleSubmit, formState: { errors }, watch } = useForm({
     mode: 'onChange', // Only validate on change, not submit
@@ -100,8 +107,40 @@ export default function Setup() {
       }
 
       toast.success('Business profile created!')
-      console.log('Redirecting to dashboard...');
-      navigate('/dashboard')
+      
+      // Handle subscription creation based on plan type
+      if (isTrial) {
+        // Create trial subscription (no payment required)
+        try {
+          console.log('Creating trial subscription...');
+          await api.post('/payments/create-trial');
+          console.log('Trial subscription created');
+          toast.success('Your 7-day free trial has started!');
+          navigate('/dashboard');
+        } catch (subscriptionError) {
+          console.error('Trial creation error:', subscriptionError);
+          toast.error('Profile created, but trial setup failed. Please contact support.');
+          navigate('/dashboard');
+        }
+      } else if (requiresPayment) {
+        // For paid plans, redirect to payment
+        try {
+          console.log('Creating checkout session for paid plan...');
+          const response = await api.post('/payments/create-checkout-session', { 
+            plan: selectedPlan, 
+            billingCycle: selectedBillingCycle 
+          });
+          window.location.href = response.data.checkout_url;
+        } catch (paymentError) {
+          console.error('Payment setup error:', paymentError);
+          toast.error('Profile created! Please complete payment from the dashboard.');
+          navigate('/dashboard');
+        }
+      } else {
+        // Default flow - go to dashboard
+        console.log('Redirecting to dashboard...');
+        navigate('/dashboard');
+      }
     } catch (error) {
       console.error('Onboarding error:', error);
       toast.error(error.response?.data?.error || 'Failed to save profile')

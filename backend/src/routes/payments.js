@@ -8,43 +8,148 @@ const router = express.Router();
 const PLANS = {
   basic: {
     name: 'Basic Plan',
-    amount: 3900,
     description: 'AI-powered marketing content for Austin small businesses',
-    lookup_key: 'austin_basic_monthly',
+    monthly: {
+      amount: 3900, // $39/month
+      lookup_key: 'austin_basic_monthly',
+      interval: 'month',
+    },
+    annual: {
+      amount: 31200, // $312/year (20% discount from $468)
+      lookup_key: 'austin_basic_annual',
+      interval: 'year',
+    },
   },
   pro: {
     name: 'Pro Plan',
-    amount: 7900,
     description: 'Advanced AI marketing — more generations, priority support',
-    lookup_key: 'austin_pro_monthly',
+    monthly: {
+      amount: 7900, // $79/month
+      lookup_key: 'austin_pro_monthly',
+      interval: 'month',
+    },
+    annual: {
+      amount: 63200, // $632/year (33% discount from $948)
+      lookup_key: 'austin_pro_annual',
+      interval: 'year',
+    },
   },
 };
 
 // Get or create a reusable Stripe Price object (used only for subscription upgrades)
-async function getOrCreatePrice(planKey) {
+async function getOrCreatePrice(planKey, billingCycle = 'monthly') {
   const plan = PLANS[planKey];
-  const prices = await stripe.prices.list({ lookup_keys: [plan.lookup_key], limit: 1 });
+  if (!plan) throw new Error(`Invalid plan: ${planKey}`);
+  
+  const planConfig = plan[billingCycle];
+  if (!planConfig) throw new Error(`Invalid billing cycle: ${billingCycle}`);
+  
+  const prices = await stripe.prices.list({ lookup_keys: [planConfig.lookup_key], limit: 1 });
   if (prices.data.length > 0) return prices.data[0];
+  
   return stripe.prices.create({
     currency: 'usd',
-    unit_amount: plan.amount,
-    recurring: { interval: 'month' },
+    unit_amount: planConfig.amount,
+    recurring: { interval: planConfig.interval },
     product_data: { name: `Austin Marketing Assistant - ${plan.name}` },
-    lookup_key: plan.lookup_key,
+    lookup_key: planConfig.lookup_key,
   });
 }
 
-// Determine plan key from Stripe price amount
-function planFromAmount(unitAmount) {
-  return unitAmount >= PLANS.pro.amount ? 'pro' : 'basic';
+// Determine plan key and billing cycle from Stripe price amount and interval
+function planFromAmount(unitAmount, interval = 'month') {
+  if (interval === 'year') {
+    // Annual pricing
+    if (unitAmount >= PLANS.pro.annual.amount) return { plan: 'pro', billingCycle: 'annual' };
+    return { plan: 'basic', billingCycle: 'annual' };
+  } else {
+    // Monthly pricing
+    if (unitAmount >= PLANS.pro.monthly.amount) return { plan: 'pro', billingCycle: 'monthly' };
+    return { plan: 'basic', billingCycle: 'monthly' };
+  }
 }
+
+// Legacy function for backward compatibility
+function planKeyFromAmount(unitAmount, interval = 'month') {
+  const result = planFromAmount(unitAmount, interval);
+  return result.plan;
+}
+
+// ─── Create trial subscription (no payment required) ──────────────────────────
+
+router.post('/create-trial', authenticateToken, async (req, res) => {
+  try {
+    const user = await dynamodb.getUserById(req.user.userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const existingSubscription = await dynamodb.getUserSubscription(req.user.userId);
+    if (existingSubscription) {
+      return res.status(400).json({ error: 'User already has a subscription' });
+    }
+
+    // Create trial subscription (7 days from now)
+    const trialEnd = new Date();
+    trialEnd.setDate(trialEnd.getDate() + 7);
+
+    await dynamodb.createOrUpdateSubscription(req.user.userId, {
+      plan: 'trial',
+      billing_cycle: 'trial',
+      status: 'active',
+      current_period_start: new Date().toISOString(),
+      current_period_end: trialEnd.toISOString(),
+      cancel_at_period_end: true // Trial ends automatically
+    });
+
+    res.json({
+      message: 'Trial subscription created successfully!',
+      subscription: {
+        plan: 'trial',
+        status: 'active',
+        trial_end: trialEnd,
+      },
+    });
+  } catch (error) {
+    console.error('Create trial error:', error.message);
+    res.status(500).json({ error: 'Failed to create trial subscription' });
+  }
+});
+
+// ─── Get plan pricing information ─────────────────────────────────────────────
+
+router.get('/plans', (req, res) => {
+  try {
+    // Return plan information without sensitive data
+    const publicPlans = {};
+    Object.keys(PLANS).forEach(planKey => {
+      const plan = PLANS[planKey];
+      publicPlans[planKey] = {
+        name: plan.name,
+        description: plan.description,
+        monthly: {
+          price: plan.monthly.amount / 100, // Convert from cents to dollars
+          interval: plan.monthly.interval
+        },
+        annual: {
+          price: plan.annual.amount / 100, // Convert from cents to dollars
+          interval: plan.annual.interval,
+          savings: (plan.monthly.amount * 12 - plan.annual.amount) / 100 // Savings in dollars
+        }
+      };
+    });
+    res.json(publicPlans);
+  } catch (error) {
+    console.error('Get plans error:', error);
+    res.status(500).json({ error: 'Failed to get plan information' });
+  }
+});
 
 // ─── Create checkout session ───────────────────────────────────────────────────
 
 router.post('/create-checkout-session', authenticateToken, async (req, res) => {
   try {
-    const { plan = 'basic' } = req.body;
+    const { plan = 'basic', billingCycle = 'monthly' } = req.body;
     if (!PLANS[plan]) return res.status(400).json({ error: 'Invalid plan' });
+    if (!PLANS[plan][billingCycle]) return res.status(400).json({ error: 'Invalid billing cycle' });
 
     const user = await dynamodb.getUserById(req.user.userId);
     if (!user) return res.status(404).json({ error: 'User not found' });
@@ -54,7 +159,7 @@ router.post('/create-checkout-session', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'User already has an active subscription' });
     }
 
-    const planConfig = PLANS[plan];
+    const planConfig = PLANS[plan][billingCycle];
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'subscription',
@@ -63,15 +168,19 @@ router.post('/create-checkout-session', authenticateToken, async (req, res) => {
         price_data: {
           currency: 'usd',
           product_data: {
-            name: `Austin Marketing Assistant - ${planConfig.name}`,
-            description: planConfig.description,
+            name: `Austin Marketing Assistant - ${PLANS[plan].name}`,
+            description: `${PLANS[plan].description} (${billingCycle === 'annual' ? 'Annual' : 'Monthly'} billing)`,
           },
           unit_amount: planConfig.amount,
-          recurring: { interval: 'month' },
+          recurring: { interval: planConfig.interval },
         },
         quantity: 1,
       }],
-      metadata: { userId: req.user.userId.toString(), plan },
+      metadata: { 
+        userId: req.user.userId.toString(), 
+        plan,
+        billingCycle 
+      },
       success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/pricing`,
     });
@@ -97,12 +206,14 @@ router.post('/success', authenticateToken, async (req, res) => {
 
     if (session.payment_status === 'paid') {
       const subscription = await stripe.subscriptions.retrieve(session.subscription);
-      const plan = planFromAmount(subscription.items.data[0]?.price?.unit_amount || 0);
+      const priceInfo = subscription.items.data[0]?.price;
+      const planInfo = planFromAmount(priceInfo?.unit_amount || 0, priceInfo?.recurring?.interval);
 
       await dynamodb.createOrUpdateSubscription(req.user.userId, {
         stripe_customer_id: subscription.customer,
         stripe_subscription_id: subscription.id,
-        plan: plan,
+        plan: planInfo.plan,
+        billing_cycle: planInfo.billingCycle,
         status: 'active',
         cancel_at_period_end: false,
         current_period_start: new Date(subscription.current_period_start * 1000).toISOString(),
@@ -113,7 +224,8 @@ router.post('/success', authenticateToken, async (req, res) => {
         message: 'Subscription activated successfully!',
         subscription: {
           id: subscription.id,
-          plan,
+          plan: planInfo.plan,
+          billing_cycle: planInfo.billingCycle,
           status: subscription.status,
           current_period_end: new Date(subscription.current_period_end * 1000),
         },
@@ -142,11 +254,13 @@ router.get('/subscription', authenticateToken, async (req, res) => {
     if (subscription.stripe_subscription_id) {
       try {
         const stripeSub = await stripe.subscriptions.retrieve(subscription.stripe_subscription_id);
-        const plan = planFromAmount(stripeSub.items.data[0]?.price?.unit_amount || 0);
+        const priceInfo = stripeSub.items.data[0]?.price;
+        const planInfo = planFromAmount(priceInfo?.unit_amount || 0, priceInfo?.recurring?.interval);
 
         await dynamodb.updateSubscription(req.user.userId, {
           status: stripeSub.status,
-          plan: plan,
+          plan: planInfo.plan,
+          billing_cycle: planInfo.billingCycle,
           cancel_at_period_end: stripeSub.cancel_at_period_end,
           current_period_start: new Date(stripeSub.current_period_start * 1000).toISOString(),
           current_period_end: new Date(stripeSub.current_period_end * 1000).toISOString()
@@ -238,7 +352,9 @@ router.post('/upgrade-subscription', authenticateToken, async (req, res) => {
     if (!subscription || subscription.status !== 'active') return res.status(404).json({ error: 'No active subscription found' });
     if (subscription.plan === 'pro') return res.status(400).json({ error: 'Already on the Pro plan' });
 
-    const proPrice = await getOrCreatePrice('pro');
+    // Keep the same billing cycle when upgrading
+    const billingCycle = subscription.billing_cycle || 'monthly';
+    const proPrice = await getOrCreatePrice('pro', billingCycle);
     const stripeSub = await stripe.subscriptions.retrieve(subscription.stripe_subscription_id);
 
     await stripe.subscriptions.update(subscription.stripe_subscription_id, {
@@ -249,6 +365,7 @@ router.post('/upgrade-subscription', authenticateToken, async (req, res) => {
 
     await dynamodb.updateSubscription(req.user.userId, {
       plan: 'pro',
+      billing_cycle: billingCycle,
       cancel_at_period_end: false
     });
 
@@ -301,10 +418,12 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
         const invoice = event.data.object;
         if (invoice.subscription) {
           const sub = await stripe.subscriptions.retrieve(invoice.subscription);
-          const plan = planFromAmount(sub.items.data[0]?.price?.unit_amount || 0);
+          const priceInfo = sub.items.data[0]?.price;
+          const planInfo = planFromAmount(priceInfo?.unit_amount || 0, priceInfo?.recurring?.interval);
           await dynamodb.updateSubscriptionByStripeId(invoice.subscription, {
             status: 'active',
-            plan: plan,
+            plan: planInfo.plan,
+            billing_cycle: planInfo.billingCycle,
             cancel_at_period_end: sub.cancel_at_period_end,
             current_period_start: new Date(sub.current_period_start * 1000).toISOString(),
             current_period_end: new Date(sub.current_period_end * 1000).toISOString()
@@ -327,15 +446,17 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
 
       case 'customer.subscription.updated': {
         const updatedSub = event.data.object;
-        const plan = planFromAmount(updatedSub.items.data[0]?.price?.unit_amount || 0);
+        const priceInfo = updatedSub.items.data[0]?.price;
+        const planInfo = planFromAmount(priceInfo?.unit_amount || 0, priceInfo?.recurring?.interval);
         await dynamodb.updateSubscriptionByStripeId(updatedSub.id, {
           status: updatedSub.status,
-          plan: plan,
+          plan: planInfo.plan,
+          billing_cycle: planInfo.billingCycle,
           cancel_at_period_end: updatedSub.cancel_at_period_end,
           current_period_start: new Date(updatedSub.current_period_start * 1000).toISOString(),
           current_period_end: new Date(updatedSub.current_period_end * 1000).toISOString()
         });
-        console.log(`Subscription updated: ${updatedSub.id} → plan=${plan}, cancel_at_period_end=${updatedSub.cancel_at_period_end}`);
+        console.log(`Subscription updated: ${updatedSub.id} → plan=${planInfo.plan}, billing=${planInfo.billingCycle}, cancel_at_period_end=${updatedSub.cancel_at_period_end}`);
         break;
       }
 

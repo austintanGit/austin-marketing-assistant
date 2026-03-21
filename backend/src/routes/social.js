@@ -7,6 +7,7 @@ const dynamodb = require('../services/dynamodb');
 const { authenticateToken } = require('./auth');
 const bedrock = require('../services/bedrock');
 const s3 = require('../services/s3');
+const pexelsService = require('../services/pexels');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -69,11 +70,11 @@ router.post('/facebook/enhance-post', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'message is required' });
   }
   try {
-    // Check daily limit
-    const used = await dynamodb.getDailyUsageCount(req.user.userId, "post_enhance");
-    if (used >= POST_ENHANCE_DAILY_LIMIT) {
+    // Check quota
+    const userQuota = await getUserQuota(req.user.userId);
+    if (userQuota.quotas.post_enhance.remaining <= 0) {
       return res.status(429).json({
-        error: `Daily AI assist limit reached (${POST_ENHANCE_DAILY_LIMIT}/day). Resets at midnight.`,
+        error: `${userQuota.plan === 'trial' ? 'Trial' : 'Daily'} AI assist limit reached. ${userQuota.plan === 'trial' ? 'Upgrade to continue.' : 'Resets at midnight.'}`,
       });
     }
 
@@ -101,11 +102,16 @@ Return ONLY the enhanced post text. No explanations, no quotes.`;
 
     const enhanced = await bedrock.generateContent(prompt, 300);
 
-    // Log usage
-    await dynamodb.incrementUsageLog(req.user.userId, 'post_enhance');
+    // Log usage (different log type for trial users)
+    const logType = userQuota.plan === 'trial' ? 'post_enhance_trial' : 'post_enhance';
+    await dynamodb.incrementUsageLog(req.user.userId, logType);
 
-    const remaining = POST_ENHANCE_DAILY_LIMIT - used - 1;
-    res.json({ enhanced: enhanced.trim(), remaining, limit: POST_ENHANCE_DAILY_LIMIT });
+    const updatedQuota = await getUserQuota(req.user.userId);
+    res.json({ 
+      enhanced: enhanced.trim(), 
+      remaining: updatedQuota.quotas.post_enhance.remaining, 
+      limit: updatedQuota.quotas.post_enhance.limit 
+    });
   } catch (err) {
     console.error('Enhance post error:', err);
     res.status(500).json({ error: err.message || 'Failed to enhance post' });
@@ -310,10 +316,13 @@ router.post('/facebook/generate-caption', authenticateToken, async (req, res) =>
     return res.status(400).json({ error: 'image_description is required' });
   }
   try {
-    // Check daily limit
-    const used = await dynamodb.getDailyUsageCount(req.user.userId, "caption_generate"); if (used >= CAPTION_DAILY_LIMIT) {
+    // Check quota
+    const userQuota = await getUserQuota(req.user.userId);
+    if (userQuota.quotas.caption_generate.remaining <= 0) {
       return res.status(429).json({
-        error: `Daily caption limit reached (${CAPTION_DAILY_LIMIT}/day). Resets at midnight.`,
+        error: userQuota.plan === 'trial' 
+          ? 'Trial caption generation limit reached. Upgrade to continue.'
+          : `Daily caption limit reached (${userQuota.quotas.caption_generate.limit}/day). Resets at midnight.`,
       });
     }
 
@@ -323,11 +332,16 @@ router.post('/facebook/generate-caption', authenticateToken, async (req, res) =>
 
     const caption = await bedrock.generateCaptionFromImageDescription(image_description, business);
 
-    // Log usage
-    await dynamodb.incrementUsageLog(req.user.userId, 'caption_generate');
+    // Log usage (different log type for trial users)
+    const logType = userQuota.plan === 'trial' ? 'caption_generate_trial' : 'caption_generate';
+    await dynamodb.incrementUsageLog(req.user.userId, logType);
 
-    const remaining = CAPTION_DAILY_LIMIT - used - 1;
-    res.json({ caption, remaining, limit: CAPTION_DAILY_LIMIT });
+    const updatedQuota = await getUserQuota(req.user.userId);
+    res.json({ 
+      caption, 
+      remaining: updatedQuota.quotas.caption_generate.remaining, 
+      limit: updatedQuota.quotas.caption_generate.limit 
+    });
   } catch (err) {
     console.error('Generate caption error:', err);
     res.status(500).json({ error: err.message || 'Failed to generate caption' });
@@ -338,23 +352,123 @@ const MONTHLY_IMAGE_LIMIT = 50;
 const IMAGE_CREDIT_PACK_CREDITS = 25;
 const IMAGE_CREDIT_PACK_PRICE_CENTS = 299; // $2.99
 
-// Helper: get full image quota for a user
-async function getImageQuota(userId) {
-  const [monthlyUsed, user] = await Promise.all([
-    dynamodb.getMonthlyUsageCount(userId, 'image_generate'),
-    dynamodb.getUserById(userId)
+// ─── Get comprehensive user quota information ─────────────────────────────────
+
+router.get('/quota', authenticateToken, async (req, res) => {
+  try {
+    const userQuota = await getUserQuota(req.user.userId);
+    res.json(userQuota);
+  } catch (error) {
+    console.error('Get quota error:', error);
+    res.status(500).json({ error: 'Failed to get quota information' });
+  }
+});
+
+// Helper: get comprehensive quota information for a user based on subscription
+async function getUserQuota(userId) {
+  const [user, subscription] = await Promise.all([
+    dynamodb.getUserById(userId),
+    dynamodb.getUserSubscription(userId)
   ]);
-  const usedThisMonth = monthlyUsed || 0;
-  const extraCredits = user?.extra_image_credits || 0;
-  const monthlyRemaining = Math.max(0, MONTHLY_IMAGE_LIMIT - usedThisMonth);
-  const totalRemaining = monthlyRemaining + extraCredits;
+
+  const isTrialUser = subscription?.plan === 'trial';
+  const isProUser = subscription?.plan === 'pro';
+  const hasActiveSubscription = subscription?.status === 'active';
+
+  // Trial users have fixed credit limits (no monthly reset)
+  if (isTrialUser && hasActiveSubscription) {
+    const trialUsage = {
+      content_generate: await dynamodb.getUserUsageLog(userId, 'content_generate_trial') || { count: 0 },
+      post_enhance: await dynamodb.getUserUsageLog(userId, 'post_enhance_trial') || { count: 0 },
+      image_generate: await dynamodb.getUserUsageLog(userId, 'image_generate_trial') || { count: 0 },
+      caption_generate: await dynamodb.getUserUsageLog(userId, 'caption_generate_trial') || { count: 0 },
+    };
+
+    return {
+      plan: 'trial',
+      trial_end: subscription.current_period_end,
+      quotas: {
+        content_generate: { used: trialUsage.content_generate.count, limit: 2, remaining: Math.max(0, 2 - trialUsage.content_generate.count) },
+        post_enhance: { used: trialUsage.post_enhance.count, limit: 5, remaining: Math.max(0, 5 - trialUsage.post_enhance.count) },
+        image_generate: { used: trialUsage.image_generate.count, limit: 2, remaining: Math.max(0, 2 - trialUsage.image_generate.count) },
+        caption_generate: { used: trialUsage.caption_generate.count, limit: 3, remaining: Math.max(0, 3 - trialUsage.caption_generate.count) },
+        email_write: { used: 0, limit: 0, remaining: 0 }, // Not available in trial
+      }
+    };
+  }
+
+  // Paid users have monthly limits
+  if (hasActiveSubscription && (subscription.plan === 'basic' || subscription.plan === 'pro')) {
+    const monthlyUsage = await Promise.all([
+      dynamodb.getMonthlyUsageCount(userId, 'content_generate'),
+      dynamodb.getDailyUsageCount(userId, 'post_enhance'),
+      dynamodb.getMonthlyUsageCount(userId, 'image_generate'),
+      dynamodb.getDailyUsageCount(userId, 'caption_generate'),
+      dynamodb.getDailyUsageCount(userId, 'email_write'),
+    ]);
+
+    const limits = isProUser ? {
+      content_generate: { monthly: 15 },
+      post_enhance: { daily: 100 },
+      image_generate: { monthly: 75 },
+      caption_generate: { daily: 75 },
+      email_write: { daily: 75 },
+    } : {
+      content_generate: { monthly: 5 },
+      post_enhance: { daily: 30 },
+      image_generate: { monthly: 25 },
+      caption_generate: { daily: 25 },
+      email_write: { daily: 25 },
+    };
+
+    const extraImageCredits = user?.extra_image_credits || 0;
+    const monthlyImageRemaining = Math.max(0, limits.image_generate.monthly - monthlyUsage[2]);
+    const totalImageRemaining = monthlyImageRemaining + extraImageCredits;
+
+    return {
+      plan: subscription.plan,
+      billing_cycle: subscription.billing_cycle,
+      quotas: {
+        content_generate: { 
+          used: monthlyUsage[0], 
+          limit: limits.content_generate.monthly, 
+          remaining: Math.max(0, limits.content_generate.monthly - monthlyUsage[0]) 
+        },
+        post_enhance: { 
+          used: monthlyUsage[1], 
+          limit: limits.post_enhance.daily, 
+          remaining: Math.max(0, limits.post_enhance.daily - monthlyUsage[1]) 
+        },
+        image_generate: { 
+          used: monthlyUsage[2], 
+          limit: limits.image_generate.monthly, 
+          remaining: totalImageRemaining,
+          extra_credits: extraImageCredits 
+        },
+        caption_generate: { 
+          used: monthlyUsage[3], 
+          limit: limits.caption_generate.daily, 
+          remaining: Math.max(0, limits.caption_generate.daily - monthlyUsage[3]) 
+        },
+        email_write: { 
+          used: monthlyUsage[4], 
+          limit: limits.email_write.daily, 
+          remaining: Math.max(0, limits.email_write.daily - monthlyUsage[4]) 
+        },
+      }
+    };
+  }
+
+  // No subscription - very limited access
   return {
-    used_this_month: usedThisMonth,
-    monthly_limit: MONTHLY_IMAGE_LIMIT,
-    monthly_remaining: monthlyRemaining,
-    extra_credits: extraCredits,
-    total_remaining: totalRemaining,
-    can_generate: totalRemaining > 0,
+    plan: 'none',
+    quotas: {
+      content_generate: { used: 0, limit: 0, remaining: 0 },
+      post_enhance: { used: 0, limit: 0, remaining: 0 },
+      image_generate: { used: 0, limit: 0, remaining: 0 },
+      caption_generate: { used: 0, limit: 0, remaining: 0 },
+      email_write: { used: 0, limit: 0, remaining: 0 },
+    }
   };
 }
 
@@ -362,8 +476,12 @@ async function getImageQuota(userId) {
 
 router.get('/facebook/image-quota', authenticateToken, async (req, res) => {
   try {
-    const quota = await getImageQuota(req.user.userId);
-    res.json(quota);
+    const userQuota = await getUserQuota(req.user.userId);
+    res.json({
+      plan: userQuota.plan,
+      quota: userQuota.quotas.image_generate,
+      can_generate: userQuota.quotas.image_generate.remaining > 0
+    });
   } catch (err) {
     console.error('Image quota error:', err);
     res.status(500).json({ error: 'Failed to check image quota' });
@@ -379,10 +497,12 @@ router.post('/facebook/generate-image', authenticateToken, async (req, res) => {
     return res.status(400).json({ error: 'prompt is required' });
   }
   try {
-    const quota = await getImageQuota(req.user.userId);
-    if (!quota.can_generate) {
+    const userQuota = await getUserQuota(req.user.userId);
+    if (userQuota.quotas.image_generate.remaining <= 0) {
       return res.status(429).json({
-        error: `No image credits remaining. Your monthly ${MONTHLY_IMAGE_LIMIT} resets on the 1st, or buy a top-up pack.`,
+        error: userQuota.plan === 'trial' 
+          ? 'Trial image generation limit reached. Upgrade to continue.' 
+          : `No image credits remaining. Your monthly ${userQuota.quotas.image_generate.limit} resets on the 1st, or buy a top-up pack.`,
       });
     }
 
@@ -426,17 +546,21 @@ router.post('/facebook/generate-image', authenticateToken, async (req, res) => {
     const s3Key = `ai-images/${req.user.userId}/${Date.now()}.png`;
     const imageUrl = await s3.uploadBuffer(imageBuffer, s3Key);
 
-    // Log generation
-    await dynamodb.incrementUsageLog(req.user.userId, 'image_generate', { prompt });
+    // Log generation (different log type for trial users)
+    const logType = userQuota.plan === 'trial' ? 'image_generate_trial' : 'image_generate';
+    await dynamodb.incrementUsageLog(req.user.userId, logType, { prompt });
 
-    // If monthly base was exhausted, deduct from extra credits
-    if (quota.monthly_remaining === 0 && quota.extra_credits > 0) {
+    // If monthly base was exhausted and user has extra credits, deduct from extra credits (paid users only)
+    if (userQuota.plan !== 'trial' && userQuota.quotas.image_generate.remaining === userQuota.quotas.image_generate.extra_credits && userQuota.quotas.image_generate.extra_credits > 0) {
       const user = await dynamodb.getUserById(req.user.userId);
       await dynamodb.updateUserCredits(req.user.userId, (user.extra_image_credits || 0) - 1);
     }
 
-    const updatedQuota = await getImageQuota(req.user.userId);
-    res.json({ image_url: imageUrl, quota: updatedQuota });
+    const updatedQuota = await getUserQuota(req.user.userId);
+    res.json({ 
+      image_url: imageUrl, 
+      quota: updatedQuota.quotas.image_generate 
+    });
   } catch (err) {
     console.error('Generate image error:', err);
     res.status(500).json({ error: err.message || 'Failed to generate image' });
@@ -615,6 +739,56 @@ router.post('/facebook/post', authenticateToken, upload.single('image'), async (
         platformPostId = photoRes.data.post_id || photoRes.data.id;
       }
 
+    } else if (imageSource === 'pexels' && imageUrl) {
+      // Pexels image is already on S3/CDN — same as AI image handling
+      console.log('[FB post] Posting Pexels image URL to Facebook:', imageUrl);
+
+      // Verify the URL is publicly reachable before sending to Facebook
+      try {
+        const headResponse = await axios.head(imageUrl, { 
+          timeout: 10000,
+          httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+        });
+        console.log('[FB post] Pexels image URL is accessible:', headResponse.status, 'Content-Type:', headResponse.headers['content-type']);
+      } catch (headErr) {
+        console.error('[FB post] ERROR: Pexels image URL is NOT accessible:', headErr.response?.status, headErr.message);
+      }
+
+      // Try URL-based upload first
+      try {
+        console.log('[FB post] Attempting Pexels URL-based upload...');
+        const photoRes = await axios.post(
+          `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+          { url: imageUrl, ...(message && { message }), access_token: connection.access_token }
+        );
+        console.log('[FB post] Facebook API response:', photoRes.data);
+        platformPostId = photoRes.data.post_id || photoRes.data.id;
+      } catch (urlError) {
+        console.log('[FB post] Pexels URL method failed, trying multipart upload...');
+        
+        // Download the image and upload as multipart form data
+        const imageResponse = await axios.get(imageUrl, { 
+          responseType: 'arraybuffer',
+          timeout: 30000
+        });
+        
+        const form = new (require('form-data'))();
+        form.append('source', Buffer.from(imageResponse.data), {
+          filename: 'pexels_image.jpg',
+          contentType: 'image/jpeg'
+        });
+        if (message) form.append('message', message);
+        form.append('access_token', connection.access_token);
+
+        const photoRes = await axios.post(
+          `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+          form,
+          { headers: form.getHeaders() }
+        );
+        console.log('[FB post] Pexels multipart upload successful:', photoRes.data);
+        platformPostId = photoRes.data.post_id || photoRes.data.id;
+      }
+
     } else {
       // Text-only post
       if (!message) return res.status(400).json({ error: 'A message is required for text-only posts' });
@@ -717,6 +891,119 @@ router.delete('/connections/:platform', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Disconnect error:', err);
     res.status(500).json({ error: 'Failed to disconnect account' });
+  }
+});
+
+// ─── PEXELS STOCK PHOTOS API ─────────────────────────────────────────────────
+// Routes for searching, selecting, and downloading Pexels stock photos
+
+// Search Pexels photos
+router.get('/pexels/search', authenticateToken, async (req, res) => {
+  try {
+    const { q: query, page = 1, per_page = 20, orientation = 'all' } = req.query;
+    
+    if (!query) {
+      return res.status(400).json({ error: 'Query parameter is required' });
+    }
+
+    // Try to get business data for context enhancement
+    let results;
+    try {
+      const businessData = await dynamodb.getBusiness(req.user.userId, req.user.userId);
+      if (businessData && Object.keys(businessData).length > 0) {
+        results = await pexelsService.searchWithBusinessContext(businessData, query);
+      } else {
+        results = await pexelsService.searchPhotos(query, per_page, page, orientation);
+      }
+    } catch (businessError) {
+      console.log('Business data not found, using regular search:', businessError.message);
+      results = await pexelsService.searchPhotos(query, per_page, page, orientation);
+    }
+    
+    res.json(results);
+  } catch (error) {
+    console.error('Pexels search error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get specific photo details
+router.get('/pexels/photo/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const photo = await pexelsService.getPhoto(id);
+    res.json(photo);
+  } catch (error) {
+    console.error('Pexels photo fetch error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Select and download photo to S3
+router.post('/pexels/select/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id: photoId } = req.params;
+    const { size = 'large' } = req.body; // tiny, small, medium, large, original
+    
+    // Get photo details
+    const photo = await pexelsService.getPhoto(photoId);
+    const imageUrl = photo.src[size] || photo.src.large;
+    
+    // Download and upload to S3
+    const uploadResult = await pexelsService.downloadAndUploadToS3(
+      imageUrl, 
+      req.user.userId, 
+      photoId
+    );
+    
+    res.json({
+      success: true,
+      image: {
+        cdnUrl: uploadResult.cdnUrl,
+        s3Key: uploadResult.s3Key,
+        fileName: uploadResult.fileName,
+        photographer: photo.photographer,
+        pexelsUrl: photo.url,
+        alt: photo.alt
+      }
+    });
+  } catch (error) {
+    console.error('Pexels select error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// AI-powered photo selection - get best photos for a prompt
+router.post('/pexels/ai-select', authenticateToken, async (req, res) => {
+  try {
+    const { prompt, count = 9 } = req.body;
+    
+    if (!prompt) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+
+    // Search for more photos than needed to have selection options
+    const searchResults = await pexelsService.searchPhotos(prompt, Math.min(count * 3, 80), 1);
+    
+    if (!searchResults.photos || searchResults.photos.length === 0) {
+      return res.json({ selectedPhotos: [], message: 'No photos found for this prompt' });
+    }
+
+    // Use AI selection to pick the best photos
+    const selectedPhotos = await pexelsService.selectBestPhotos(
+      searchResults.photos, 
+      prompt, 
+      count
+    );
+    
+    res.json({
+      selectedPhotos,
+      totalFound: searchResults.total_results,
+      reasoning: `Selected ${selectedPhotos.length} diverse, high-quality photos optimized for social media`
+    });
+  } catch (error) {
+    console.error('AI Pexels selection error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 

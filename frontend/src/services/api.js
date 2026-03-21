@@ -30,4 +30,32 @@ api.interceptors.response.use(
   }
 )
 
+// ─── PEXELS API FUNCTIONS ─────────────────────────────────────────────────────
+
+// Search Pexels photos
+export const searchPexelsPhotos = async (query, page = 1, per_page = 20, orientation = 'all') => {
+  const response = await api.get(`/social/pexels/search`, {
+    params: { q: query, page, per_page, orientation }
+  })
+  return response.data
+}
+
+// Get specific photo details
+export const getPexelsPhoto = async (photoId) => {
+  const response = await api.get(`/social/pexels/photo/${photoId}`)
+  return response.data
+}
+
+// Select and download photo to S3
+export const selectPexelsPhoto = async (photoId, size = 'large') => {
+  const response = await api.post(`/social/pexels/select/${photoId}`, { size })
+  return response.data
+}
+
+// AI-powered photo selection
+export const aiSelectPexelsPhotos = async (prompt, count = 9) => {
+  const response = await api.post(`/social/pexels/ai-select`, { prompt, count })
+  return response.data
+}
+
 export default api

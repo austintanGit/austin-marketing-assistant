@@ -5,16 +5,63 @@ const bedrockService = require('../services/bedrock');
 
 const router = express.Router();
 
-const CONTENT_GENERATE_MONTHLY_LIMIT = 5;
+// Import the quota helper from social routes (we should move this to a shared utility)
+async function getUserQuota(userId) {
+  const [user, subscription] = await Promise.all([
+    dynamodb.getUserById(userId),
+    dynamodb.getUserSubscription(userId)
+  ]);
+
+  const isTrialUser = subscription?.plan === 'trial';
+  const isProUser = subscription?.plan === 'pro';
+  const hasActiveSubscription = subscription?.status === 'active';
+
+  // Trial users have fixed credit limits
+  if (isTrialUser && hasActiveSubscription) {
+    const trialUsage = {
+      content_generate: await dynamodb.getUserUsageLog(userId, 'content_generate_trial') || { count: 0 },
+    };
+
+    return {
+      plan: 'trial',
+      quotas: {
+        content_generate: { used: trialUsage.content_generate.count, limit: 2, remaining: Math.max(0, 2 - trialUsage.content_generate.count) },
+      }
+    };
+  }
+
+  // Paid users have monthly limits
+  if (hasActiveSubscription && (subscription.plan === 'basic' || subscription.plan === 'pro')) {
+    const monthlyUsage = await dynamodb.getMonthlyUsageCount(userId, 'content_generate');
+    const limit = isProUser ? 15 : 5;
+
+    return {
+      plan: subscription.plan,
+      quotas: {
+        content_generate: { used: monthlyUsage, limit: limit, remaining: Math.max(0, limit - monthlyUsage) },
+      }
+    };
+  }
+
+  // No subscription
+  return {
+    plan: 'none',
+    quotas: {
+      content_generate: { used: 0, limit: 0, remaining: 0 },
+    }
+  };
+}
 
 // Generate all content for a business
 router.post('/generate', authenticateToken, async (req, res) => {
   try {
-    // Check monthly generation limit
-    const usageCount = await dynamodb.getMonthlyUsageCount(req.user.userId, 'content_generate');
-    if (usageCount >= CONTENT_GENERATE_MONTHLY_LIMIT) {
+    // Check generation limit
+    const userQuota = await getUserQuota(req.user.userId);
+    if (userQuota.quotas.content_generate.remaining <= 0) {
       return res.status(429).json({
-        error: `Monthly content generation limit reached (${CONTENT_GENERATE_MONTHLY_LIMIT}/month). Resets on the 1st.`,
+        error: userQuota.plan === 'trial' 
+          ? 'Trial content generation limit reached. Upgrade to continue.'
+          : `Monthly content generation limit reached (${userQuota.quotas.content_generate.limit}/month). Resets on the 1st.`,
       });
     }
 
@@ -26,36 +73,35 @@ router.post('/generate', authenticateToken, async (req, res) => {
     
     const business = businesses[0]; // Use first business
 
-    console.log(`🤖 Generating content for ${business.business_name}...`);
+    console.log(`🤖 Generating social posts for ${business.business_name}...`);
 
-    // Generate all content types in parallel
-    const [socialPosts, gmbPosts, emailTemplates] = await Promise.all([
-      bedrockService.generateSocialPosts(business, 10),
-      bedrockService.generateGMBPosts(business, 8), 
-      bedrockService.generateEmailTemplates(business, 4)
-    ]);
+    // Generate only social media posts (10 posts)
+    const socialPosts = await bedrockService.generateSocialPosts(business, 10);
 
     // Parse and store generated content
     const parsedContent = {
-      social_posts: parseSocialPosts(socialPosts),
-      gmb_posts: parseGMBPosts(gmbPosts),
-      email_templates: parseEmailTemplates(emailTemplates)
+      social_posts: parseSocialPosts(socialPosts)
     };
 
     // Store in database
     await storeGeneratedContent(business.id, parsedContent);
 
-    console.log(`✅ Content generation complete for ${business.business_name}`);
+    console.log(`✅ Social content generation complete for ${business.business_name}`);
 
-    // Log usage
-    await dynamodb.incrementUsageLog(req.user.userId, 'content_generate');
+    // Log usage (different log type for trial users)
+    const logType = userQuota.plan === 'trial' ? 'content_generate_trial' : 'content_generate';
+    await dynamodb.incrementUsageLog(req.user.userId, logType);
 
-    const usedAfter = usageCount + 1;
+    const updatedQuota = await getUserQuota(req.user.userId);
     res.json({
       message: 'Content generated successfully!',
       content: parsedContent,
       generated_at: new Date().toISOString(),
-      quota: { used: usedAfter, limit: CONTENT_GENERATE_MONTHLY_LIMIT, remaining: CONTENT_GENERATE_MONTHLY_LIMIT - usedAfter },
+      quota: { 
+        used: updatedQuota.quotas.content_generate.used, 
+        limit: updatedQuota.quotas.content_generate.limit, 
+        remaining: updatedQuota.quotas.content_generate.remaining 
+      },
     });
 
   } catch (error) {
@@ -163,11 +209,9 @@ router.get('/history', authenticateToken, async (req, res) => {
 
     const content = await dynamodb.getBusinessContent(business.id);
 
-    // Group content by type
+    // Group content by type (only social posts now)
     const groupedContent = {
-      social_posts: content.filter(c => c.content_type === 'social_post'),
-      gmb_posts: content.filter(c => c.content_type === 'gmb_post'),
-      email_templates: content.filter(c => c.content_type === 'email')
+      social_posts: content.filter(c => c.content_type === 'social_post')
     };
 
     res.json({ content: groupedContent });
@@ -232,52 +276,6 @@ function parseSocialPosts(rawContent) {
   return posts;
 }
 
-function parseGMBPosts(rawContent) {
-  const posts = [];
-  const postRegex = /GMB POST (\d+):\s*Title:\s*(.*?)\s*Content:\s*([\s\S]*?)(?=GMB POST \d+:|---|\n\n$|$)/g;
-  let match;
-
-  while ((match = postRegex.exec(rawContent)) !== null) {
-    const title = match[2].trim();
-    const content = match[3].trim();
-    
-    if (title && content) {
-      posts.push({
-        type: 'gmb_post',
-        title: title,
-        content: content,
-        platform: 'gmb'
-      });
-    }
-  }
-
-  return posts;
-}
-
-function parseEmailTemplates(rawContent) {
-  const emails = [];
-  const emailRegex = /EMAIL (\d+):\s*(.*?)\s*Subject:\s*(.*?)\s*Body:\s*([\s\S]*?)(?=EMAIL \d+:|---|\n\n$|$)/g;
-  let match;
-
-  while ((match = emailRegex.exec(rawContent)) !== null) {
-    const type = match[2].trim();
-    const subject = match[3].trim();
-    const body = match[4].trim();
-    
-    if (subject && body) {
-      emails.push({
-        type: 'email',
-        email_type: type,
-        title: subject,
-        content: body,
-        platform: 'email'
-      });
-    }
-  }
-
-  return emails;
-}
-
 function extractHashtags(content) {
   const hashtags = content.match(/#[\w]+/g);
   return hashtags ? hashtags.join(' ') : '';
@@ -286,9 +284,7 @@ function extractHashtags(content) {
 // Store generated content in database
 async function storeGeneratedContent(businessId, content) {
   const allContent = [
-    ...content.social_posts,
-    ...content.gmb_posts, 
-    ...content.email_templates
+    ...content.social_posts
   ];
 
   for (const item of allContent) {

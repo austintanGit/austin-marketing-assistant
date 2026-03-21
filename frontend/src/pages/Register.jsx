@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import toast from 'react-hot-toast'
 
@@ -13,6 +13,13 @@ export default function Register() {
   
   const { register } = useAuth()
   const navigate = useNavigate()
+  const location = useLocation()
+  
+  // Get plan and billing cycle from pricing page
+  const selectedPlan = location.state?.plan || 'basic'
+  const selectedBillingCycle = location.state?.billingCycle || 'monthly'
+  const requiresPayment = location.state?.requiresPayment || false
+  const isTrial = selectedPlan === 'trial'
 
   const handleChange = (e) => {
     setFormData({
@@ -41,7 +48,23 @@ export default function Register() {
       
       if (result.success) {
         toast.success('Account created successfully!')
-        navigate('/setup')
+        if (isTrial) {
+          // For trial users, go directly to setup without payment
+          navigate('/setup', { 
+            state: { 
+              plan: 'trial'
+            } 
+          })
+        } else {
+          // For paid plans, go to setup and then redirect to payment
+          navigate('/setup', { 
+            state: { 
+              plan: selectedPlan, 
+              billingCycle: selectedBillingCycle,
+              requiresPayment: true
+            } 
+          })
+        }
       } else {
         toast.error(result.error)
       }
@@ -62,6 +85,30 @@ export default function Register() {
           <p className="mt-2 text-center text-sm text-gray-600">
             Join Austin small businesses saving time on marketing
           </p>
+          {(selectedPlan && selectedPlan !== 'trial') && (
+            <div className="mt-4 p-3 bg-austin-green bg-opacity-10 rounded-lg text-center">
+              <p className="text-sm text-austin-green font-semibold">
+                Selected: {selectedPlan === 'pro' ? 'Pro' : 'Basic'} Plan 
+                {selectedBillingCycle === 'annual' && (
+                  <span className="ml-1">
+                    (Annual - Save {selectedPlan === 'pro' ? '33%' : '20%'}!)
+                  </span>
+                )}
+              </p>
+              {requiresPayment && (
+                <p className="text-xs text-gray-600 mt-1">
+                  Payment required after account setup
+                </p>
+              )}
+            </div>
+          )}
+          {isTrial && (
+            <div className="mt-4 p-3 bg-blue-50 rounded-lg text-center">
+              <p className="text-sm text-blue-700 font-semibold">
+                7-Day Free Trial • No Credit Card Required
+              </p>
+            </div>
+          )}
         </div>
         
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>

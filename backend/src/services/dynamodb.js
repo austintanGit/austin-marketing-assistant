@@ -404,6 +404,7 @@ class DynamoDBService {
       stripe_customer_id: subscriptionData.stripe_customer_id || null,
       stripe_subscription_id: subscriptionData.stripe_subscription_id || null,
       plan: subscriptionData.plan || 'basic',
+      billing_cycle: subscriptionData.billing_cycle || 'monthly',
       status: subscriptionData.status || 'active',
       current_period_start: subscriptionData.current_period_start || null,
       current_period_end: subscriptionData.current_period_end || null,

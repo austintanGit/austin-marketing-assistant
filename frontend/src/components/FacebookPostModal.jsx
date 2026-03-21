@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
-import api from '../services/api'
+import api, { searchPexelsPhotos, selectPexelsPhoto, aiSelectPexelsPhotos } from '../services/api'
 import toast from 'react-hot-toast'
 import {
   XMarkIcon,
@@ -8,11 +8,13 @@ import {
   SparklesIcon,
   ArrowUpTrayIcon,
   ArrowPathIcon,
+  MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline'
 
 const IMAGE_MODES = [
   { id: 'none', label: 'No image', description: 'Text-only post' },
   { id: 'upload', label: 'Upload photo', description: 'Use your own photo' },
+  { id: 'pexels', label: 'Stock photos', description: 'Browse Pexels gallery' },
   { id: 'ai', label: 'AI generate', description: 'Create image with AI' },
 ]
 
@@ -25,6 +27,14 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
   const [uploadPreview, setUploadPreview] = useState(null)
   const [imageDescription, setImageDescription] = useState('')
   const [generatingCaption, setGeneratingCaption] = useState(false)
+
+  // Pexels photo state
+  const [pexelsQuery, setPexelsQuery] = useState('')
+  const [pexelsResults, setPexelsResults] = useState([])
+  const [selectedPexelsPhoto, setSelectedPexelsPhoto] = useState(null)
+  const [pexelsLoading, setPexelsLoading] = useState(false)
+  const [downloadingPexels, setDownloadingPexels] = useState(false)
+  const [pexelsImageUrl, setPexelsImageUrl] = useState(null)
 
   // AI image state
   const [aiPrompt, setAiPrompt] = useState('')
@@ -52,6 +62,10 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       setUploadedFile(null)
       setUploadPreview(null)
       setImageDescription('')
+      setPexelsQuery('')
+      setPexelsResults([])
+      setSelectedPexelsPhoto(null)
+      setPexelsImageUrl(null)
       setAiPrompt('')
       setAiImageUrl(null)
       setShowAiAssist(false)
@@ -169,6 +183,10 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       toast.error('Please select a photo to upload')
       return
     }
+    if (imageMode === 'pexels' && !pexelsImageUrl) {
+      toast.error('Please select a photo from Pexels')
+      return
+    }
     if (imageMode === 'ai' && !aiImageUrl) {
       toast.error('Please generate an image first')
       return
@@ -182,6 +200,8 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
 
       if (imageMode === 'upload' && uploadedFile) {
         formData.append('image', uploadedFile)
+      } else if (imageMode === 'pexels' && pexelsImageUrl) {
+        formData.append('image_url', pexelsImageUrl)
       } else if (imageMode === 'ai' && aiImageUrl) {
         formData.append('image_url', aiImageUrl)
       }
@@ -198,6 +218,70 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       toast.error(msg)
     } finally {
       setPosting(false)
+    }
+  }
+
+  // Pexels handlers
+  const handleSearchPexels = async () => {
+    if (!pexelsQuery.trim()) {
+      toast.error('Enter a search term')
+      return
+    }
+    
+    setPexelsLoading(true)
+    setPexelsResults([])
+    setSelectedPexelsPhoto(null)
+    
+    try {
+      const results = await searchPexelsPhotos(pexelsQuery, 1, 20)
+      setPexelsResults(results.photos || [])
+      if (results.photos.length === 0) {
+        toast.info('No photos found for this search. Try different keywords.')
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to search photos')
+    } finally {
+      setPexelsLoading(false)
+    }
+  }
+
+  const handleAiSelectPexels = async () => {
+    if (!message.trim()) {
+      toast.error('Write your post message first so AI can choose relevant photos')
+      return
+    }
+    
+    setPexelsLoading(true)
+    setPexelsResults([])
+    setSelectedPexelsPhoto(null)
+    
+    try {
+      const results = await aiSelectPexelsPhotos(message, 9)
+      setPexelsResults(results.selectedPhotos || [])
+      if (results.selectedPhotos.length === 0) {
+        toast.info('No photos found for your post content. Try manual search with specific keywords.')
+      } else {
+        toast.success(`AI selected ${results.selectedPhotos.length} photos that match your post!`)
+      }
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to get AI photo selection')
+    } finally {
+      setPexelsLoading(false)
+    }
+  }
+
+  const handleSelectPexelsPhoto = async () => {
+    if (!selectedPexelsPhoto) return
+    
+    setDownloadingPexels(true)
+    try {
+      const result = await selectPexelsPhoto(selectedPexelsPhoto.id, 'large')
+      setPexelsImageUrl(result.image.cdnUrl)
+      toast.success(`Photo by ${result.image.photographer} is ready to use!`)
+    } catch (error) {
+      toast.error(error.response?.data?.error || 'Failed to download photo')
+    } finally {
+      setDownloadingPexels(false)
     }
   }
 
@@ -339,6 +423,135 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
                   </button>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Pexels stock photos panel */}
+          {imageMode === 'pexels' && (
+            <div className="space-y-3 bg-gray-50 rounded-xl p-4">
+              {/* Search bar */}
+              <div className="flex items-center space-x-2">
+                <MagnifyingGlassIcon className="h-4 w-4 text-gray-500" />
+                <input
+                  type="text"
+                  placeholder="Search stock photos (e.g., coffee shop, team meeting)"
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-austin-orange"
+                  value={pexelsQuery}
+                  onChange={(e) => setPexelsQuery(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleSearchPexels()}
+                />
+                <button
+                  onClick={handleSearchPexels}
+                  className="px-4 py-2 bg-austin-orange text-white text-sm font-medium rounded-lg hover:bg-orange-600 disabled:opacity-50 transition-colors"
+                  disabled={pexelsLoading}
+                >
+                  {pexelsLoading ? 'Searching...' : 'Search'}
+                </button>
+              </div>
+
+              {/* AI Quick Select */}
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-600">Let AI choose photos based on your post:</span>
+                <button
+                  onClick={handleAiSelectPexels}
+                  disabled={pexelsLoading || !message.trim()}
+                  className="flex items-center gap-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 disabled:opacity-50 px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  <SparklesIcon className="h-3 w-3" />
+                  AI Pick 9
+                </button>
+              </div>
+
+              {/* Photo grid */}
+              {pexelsResults.length > 0 && (
+                <div className="grid grid-cols-3 gap-2 max-h-64 overflow-y-auto">
+                  {pexelsResults.map((photo) => (
+                    <div
+                      key={photo.id}
+                      className={`relative cursor-pointer rounded-lg overflow-hidden border-2 transition-all ${
+                        selectedPexelsPhoto?.id === photo.id ? 'border-austin-orange ring-2 ring-austin-orange/20' : 'border-transparent hover:border-gray-300'
+                      }`}
+                      onClick={() => setSelectedPexelsPhoto(photo)}
+                    >
+                      <img
+                        src={photo.src.medium}
+                        alt={photo.alt}
+                        className="w-full h-20 object-cover"
+                      />
+                      <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white text-xs p-1 truncate">
+                        {photo.photographer}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Selected photo preview and download */}
+              {selectedPexelsPhoto && (
+                <div className="border border-gray-200 rounded-lg p-3 bg-white">
+                  <div className="flex items-start space-x-3">
+                    <img
+                      src={selectedPexelsPhoto.src.small}
+                      alt={selectedPexelsPhoto.alt}
+                      className="w-16 h-16 object-cover rounded flex-shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 truncate">
+                        {selectedPexelsPhoto.alt || 'Selected photo'}
+                      </p>
+                      <p className="text-xs text-gray-500">
+                        By {selectedPexelsPhoto.photographer}
+                      </p>
+                      <div className="flex items-center gap-2 mt-2">
+                        <button
+                          onClick={handleSelectPexelsPhoto}
+                          disabled={downloadingPexels}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-austin-orange text-white text-sm font-medium rounded hover:bg-orange-600 disabled:opacity-50 transition-colors"
+                        >
+                          {downloadingPexels ? (
+                            <>
+                              <ArrowPathIcon className="h-4 w-4 animate-spin" />
+                              Downloading...
+                            </>
+                          ) : (
+                            <>
+                              <ArrowUpTrayIcon className="h-4 w-4" />
+                              Use This Photo
+                            </>
+                          )}
+                        </button>
+                        <a
+                          href={selectedPexelsPhoto.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-gray-500 hover:text-gray-700"
+                        >
+                          View on Pexels
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Current selected image preview */}
+              {pexelsImageUrl && (
+                <div className="border border-gray-200 rounded-lg p-3 bg-white">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-gray-900">Selected Photo</span>
+                    <button
+                      onClick={() => {
+                        setPexelsImageUrl(null)
+                        setSelectedPexelsPhoto(null)
+                      }}
+                      className="text-gray-400 hover:text-gray-600"
+                    >
+                      <XMarkIcon className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <img src={pexelsImageUrl} alt="Selected" className="max-h-48 mx-auto rounded-lg object-contain" />
+                </div>
+              )}
             </div>
           )}
 
