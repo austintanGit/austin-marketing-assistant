@@ -150,6 +150,50 @@ router.get('/connections', authenticateToken, async (req, res) => {
   }
 });
 
+// ─── DEBUG: Manual Instagram Check ───────────────────────────────────────────
+// Temporary endpoint to manually test Instagram detection
+router.get('/debug/instagram-check', authenticateToken, async (req, res) => {
+  try {
+    const connections = await dynamodb.getUserSocialConnections(req.user.userId);
+    const fbConnection = connections.find(conn => conn.platform === 'facebook');
+    
+    if (!fbConnection) {
+      return res.json({ error: 'No Facebook connection found' });
+    }
+
+    const pageToken = fbConnection.access_token;
+    const pageId = fbConnection.platform_page_id;
+    
+    console.log(`🔍 Manual Instagram check - Page ID: ${pageId}, Token exists: ${!!pageToken}`);
+    
+    if (!pageId) {
+      return res.json({ error: 'No Facebook page ID found' });
+    }
+
+    // Test the exact same call that happens during OAuth
+    const igRes = await axios.get(`https://graph.facebook.com/v18.0/${pageId}`, {
+      params: {
+        fields: 'instagram_business_account,name,id',
+        access_token: pageToken,
+      },
+    });
+
+    res.json({
+      success: true,
+      pageData: igRes.data,
+      hasInstagram: !!igRes.data.instagram_business_account,
+      instagramId: igRes.data.instagram_business_account?.id || null
+    });
+    
+  } catch (error) {
+    console.error('Manual Instagram check error:', error.response?.data || error.message);
+    res.status(500).json({
+      error: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
 // ─── Facebook OAuth ───────────────────────────────────────────────────────────
 
 router.get('/facebook/auth', authenticateToken, (req, res) => {
@@ -224,6 +268,7 @@ router.get('/facebook/callback', async (req, res) => {
     });
     const pages = pagesRes.data.data || [];
     console.log(`📄 Found ${pages.length} pages`);
+    console.log('📊 Pages data:', JSON.stringify(pages, null, 2));
 
     let pageId = null;
     let pageName = null;
@@ -238,16 +283,28 @@ router.get('/facebook/callback', async (req, res) => {
 
       // Check for connected Instagram business account
       try {
+        console.log(`🔍 Checking for Instagram account on page ${pageId}...`);
         const igRes = await axios.get(`https://graph.facebook.com/v18.0/${pageId}`, {
           params: {
             fields: 'instagram_business_account',
             access_token: pageToken,
           },
         });
+        console.log('📊 Instagram API response:', JSON.stringify(igRes.data, null, 2));
         instagramAccountId = igRes.data.instagram_business_account?.id || null;
-        console.log(`📷 Instagram account: ${instagramAccountId ? 'Found' : 'None'}`);
+        console.log(`📷 Instagram account: ${instagramAccountId ? `Found (ID: ${instagramAccountId})` : 'None detected'}`);
+        
+        if (!instagramAccountId) {
+          console.log('💡 No Instagram account found. Make sure:');
+          console.log('   1. Your Instagram is a Business account');
+          console.log('   2. It is linked to this Facebook page in Business Manager');
+          console.log('   3. Your Facebook app has Instagram permissions approved');
+        }
       } catch (igErr) {
-        console.warn('Could not fetch Instagram account:', igErr.message);
+        console.error('❌ Instagram account fetch error:');
+        console.error('   Message:', igErr.message);
+        console.error('   Response:', igErr.response?.data);
+        console.error('   Status:', igErr.response?.status);
       }
     }
 
