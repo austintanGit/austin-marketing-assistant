@@ -574,19 +574,75 @@ router.post('/facebook/post', authenticateToken, upload.single('image'), async (
       const s3Key = `uploads/${req.user.userId}/${Date.now()}_${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
       const uploadedUrl = await s3.uploadBuffer(req.file.buffer, s3Key, req.file.mimetype);
 
+      console.log('[FB post] Posting uploaded image URL to Facebook:', uploadedUrl);
+
+      // Verify the URL is publicly reachable before sending to Facebook
+      try {
+        const headResponse = await axios.head(uploadedUrl, { 
+          timeout: 10000,
+          httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }) // Ignore SSL issues for URL test
+        });
+        console.log('[FB post] Image URL is accessible:', headResponse.status, 'Content-Type:', headResponse.headers['content-type']);
+      } catch (headErr) {
+        console.error('[FB post] ERROR: Image URL is NOT accessible:', headErr.response?.status, headErr.message);
+        console.error('[FB post] This will cause Facebook to reject the image');
+      }
+
       const photoRes = await axios.post(
         `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
         { url: uploadedUrl, ...(message && { message }), access_token: connection.access_token }
       );
+      console.log('[FB post] Facebook API response:', photoRes.data);
       platformPostId = photoRes.data.post_id || photoRes.data.id;
 
     } else if (imageSource === 'ai' && imageUrl) {
       // AI image is already on S3/CDN — post directly via URL
-      const photoRes = await axios.post(
-        `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
-        { url: imageUrl, ...(message && { message }), access_token: connection.access_token }
-      );
-      platformPostId = photoRes.data.post_id || photoRes.data.id;
+      console.log('[FB post] Posting AI image URL to Facebook:', imageUrl);
+
+      // Verify the URL is publicly reachable before sending to Facebook
+      try {
+        const headResponse = await axios.head(imageUrl, { 
+          timeout: 10000,
+          httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }) // Ignore SSL issues for URL test
+        });
+        console.log('[FB post] Image URL is accessible:', headResponse.status, 'Content-Type:', headResponse.headers['content-type']);
+      } catch (headErr) {
+        console.error('[FB post] ERROR: Image URL is NOT accessible:', headErr.response?.status, headErr.message);
+        console.error('[FB post] This will cause Facebook to reject the image');
+      }
+
+      // Try alternative method: Download image first, then upload as multipart
+      try {
+        console.log('[FB post] Attempting URL-based upload first...');
+        const photoRes = await axios.post(
+          `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+          { url: imageUrl, ...(message && { message }), access_token: connection.access_token }
+        );
+        console.log('[FB post] Facebook API response:', photoRes.data);
+        platformPostId = photoRes.data.post_id || photoRes.data.id;
+      } catch (urlError) {
+        console.log('[FB post] URL method failed, trying multipart upload...');
+        
+        // Download the image and upload as multipart form data
+        const imageResponse = await axios.get(imageUrl, { 
+          responseType: 'stream',
+          httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+        });
+        
+        const FormData = require('form-data');
+        const form = new FormData();
+        form.append('source', imageResponse.data, { filename: 'image.png', contentType: 'image/png' });
+        if (message) form.append('message', message);
+        form.append('access_token', connection.access_token);
+
+        const photoRes = await axios.post(
+          `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+          form,
+          { headers: form.getHeaders() }
+        );
+        console.log('[FB post] Multipart upload successful:', photoRes.data);
+        platformPostId = photoRes.data.post_id || photoRes.data.id;
+      }
 
     } else {
       // Text-only post
