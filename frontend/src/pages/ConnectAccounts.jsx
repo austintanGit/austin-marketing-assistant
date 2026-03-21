@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useSearchParams, Link } from 'react-router-dom'
+import { useSearchParams, Link, useNavigate } from 'react-router-dom'
 import api from '../services/api'
 import toast from 'react-hot-toast'
 import {
@@ -37,6 +37,7 @@ export default function ConnectAccounts() {
   const [connecting, setConnecting] = useState({})
   const [disconnecting, setDisconnecting] = useState({})
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
 
   useEffect(() => {
     loadConnections()
@@ -49,6 +50,8 @@ export default function ConnectAccounts() {
     if (connected) {
       toast.success(`Facebook connected successfully!`)
       loadConnections()
+      // Clear URL parameters after processing
+      navigate('/connect-accounts', { replace: true })
     }
 
     if (error) {
@@ -58,13 +61,18 @@ export default function ConnectAccounts() {
         invalid_state: 'Security check failed. Please try connecting again.',
       }
       toast.error(messages[error] || 'Connection failed. Please try again.')
+      // Clear URL parameters after processing
+      navigate('/connect-accounts', { replace: true })
     }
-  }, [searchParams])
+  }, [searchParams, navigate])
 
   const loadConnections = async () => {
     try {
+      console.log('🔍 Loading connections from API...');
       const res = await api.get('/social/connections')
+      console.log('📊 API response:', res.data);
       setConnections(res.data.connections || {})
+      console.log('📋 Set connections state:', res.data.connections || {});
     } catch (err) {
       console.error('Failed to load connections:', err)
     } finally {

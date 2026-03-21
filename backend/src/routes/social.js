@@ -122,7 +122,14 @@ Return ONLY the enhanced post text. No explanations, no quotes.`;
 
 router.get('/connections', authenticateToken, async (req, res) => {
   try {
-    const rows = await dynamodb.getUserSocialConnections(req.user.userId);
+    // Ensure userId is consistently an integer (matches Facebook OAuth flow)
+    const userId = parseInt(req.user.userId);
+    console.log('🔍 Loading connections for user:', userId);
+    console.log('🔍 Original userId from token:', req.user.userId);
+    console.log('🔍 Parsed userId:', userId);
+    
+    const rows = await dynamodb.getUserSocialConnections(userId);
+    console.log('📊 Raw connections from DB:', rows);
 
     const connections = {};
     rows.forEach(row => {
@@ -135,6 +142,7 @@ router.get('/connections', authenticateToken, async (req, res) => {
       };
     });
 
+    console.log('📋 Formatted connections:', connections);
     res.json({ connections });
   } catch (err) {
     console.error('Get connections error:', err);
@@ -653,7 +661,9 @@ router.post('/facebook/verify-credit-purchase', authenticateToken, async (req, r
 
 router.post('/facebook/post', authenticateToken, upload.single('image'), async (req, res) => {
   try {
-    const connection = await dynamodb.getUserSocialConnection(req.user.userId, 'facebook');
+    // Ensure userId is consistently an integer (matches Facebook OAuth flow)
+    const userId = parseInt(req.user.userId);
+    const connection = await dynamodb.getUserSocialConnection(userId, 'facebook');
     if (!connection) {
       return res.status(400).json({ error: 'Facebook account not connected' });
     }
@@ -800,7 +810,7 @@ router.post('/facebook/post', authenticateToken, upload.single('image'), async (
     }
 
     // Log the post
-    await dynamodb.logSocialPost(req.user.userId, 'facebook', {
+    await dynamodb.logSocialPost(userId, 'facebook', {
       platform_post_id: platformPostId,
       message: message,
       has_image: imageSource !== 'none',
@@ -826,9 +836,11 @@ router.post('/publish/:contentId', authenticateToken, async (req, res) => {
   }
 
   try {
-    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    // Ensure userId is consistently an integer (matches OAuth flows)
+    const userId = parseInt(req.user.userId);
+    const businesses = await dynamodb.getUserBusinesses(userId);
     if (!businesses || businesses.length === 0) return res.status(404).json({ error: 'Business not found' });
-    
+
     const business = businesses[0];
 
     const contentItem = null; // TODO: Get content from DynamoDB
@@ -840,7 +852,7 @@ router.post('/publish/:contentId', authenticateToken, async (req, res) => {
     await Promise.allSettled(
       platforms.map(async (platform) => {
         try {
-          const connection = await dynamodb.getUserSocialConnection(req.user.userId, platform);
+          const connection = await dynamodb.getUserSocialConnection(userId, platform);
 
           if (!connection) {
             errors[platform] = 'Account not connected';
@@ -886,7 +898,9 @@ router.post('/publish/:contentId', authenticateToken, async (req, res) => {
 
 router.delete('/connections/:platform', authenticateToken, async (req, res) => {
   try {
-    await dynamodb.deleteSocialConnection(req.user.userId, req.params.platform);
+    // Ensure userId is consistently an integer (matches OAuth flows)
+    const userId = parseInt(req.user.userId);
+    await dynamodb.deleteSocialConnection(userId, req.params.platform);
     res.json({ message: `${req.params.platform} disconnected successfully` });
   } catch (err) {
     console.error('Disconnect error:', err);

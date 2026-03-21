@@ -455,6 +455,9 @@ class DynamoDBService {
 
   // Social connection operations
   async createOrUpdateSocialConnection(userId, platform, connectionData) {
+    console.log('💾 createOrUpdateSocialConnection - connected status:', this.connected);
+    console.log('📊 Connection data to save:', { userId, platform, connectionData });
+    
     if (!this.connected) {
       console.log(`📝 DynamoDB fallback: createOrUpdateSocialConnection (${platform}) - using mock data`);
       const connection = {
@@ -465,8 +468,11 @@ class DynamoDBService {
         created_at: new Date().toISOString()
       };
       this.mockData.set(`social:${userId}:${platform}`, connection);
+      console.log('📊 Saved to mock data:', connection);
       return Promise.resolve(connection);
     }
+
+    console.log('💾 Using real DynamoDB for createOrUpdateSocialConnection');
 
     const timestamp = new Date().toISOString();
 
@@ -487,8 +493,16 @@ class DynamoDBService {
       updated_at: timestamp
     };
 
-    await this.put(item);
-    return item;
+    console.log('📊 Item to save to DynamoDB:', item);
+    
+    try {
+      await this.put(item);
+      console.log('✅ Item saved successfully to DynamoDB');
+      return item;
+    } catch (error) {
+      console.error('❌ Failed to save to DynamoDB:', error);
+      throw error;
+    }
   }
 
   async getUserSocialConnection(userId, platform) {
@@ -502,6 +516,8 @@ class DynamoDBService {
   }
 
   async getUserSocialConnections(userId) {
+    console.log('🔍 getUserSocialConnections - connected status:', this.connected);
+    
     if (!this.connected) {
       console.log('📝 DynamoDB fallback: getUserSocialConnections - using mock data');
       const connections = [];
@@ -510,16 +526,26 @@ class DynamoDBService {
           connections.push(connection);
         }
       }
+      console.log('📊 Mock data connections:', connections);
       return Promise.resolve(connections);
     }
 
-    return await this.query({
-      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
-      ExpressionAttributeValues: {
-        ':pk': `USER#${userId}`,
-        ':sk': 'SOCIAL#'
-      }
-    });
+    console.log('💾 Using real DynamoDB for getUserSocialConnections');
+    
+    try {
+      const result = await this.query({
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :sk)',
+        ExpressionAttributeValues: {
+          ':pk': `USER#${userId}`,
+          ':sk': 'SOCIAL#'
+        }
+      });
+      console.log('📊 DynamoDB query result:', result);
+      return result;
+    } catch (error) {
+      console.error('❌ DynamoDB query failed:', error);
+      throw error;
+    }
   }
 
   async deleteSocialConnection(userId, platform) {
