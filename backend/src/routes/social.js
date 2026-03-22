@@ -53,13 +53,11 @@ function verifyStateToken(state) {
     const expected = hmac.digest('hex');
     if (signature !== expected) return null;
 
-    return parseInt(userId);
+    return userId;
   } catch {
     return null;
   }
 }
-
-const POST_ENHANCE_DAILY_LIMIT = 10;
 
 // ─── POST /api/social/facebook/enhance-post ───────────────────────────────────
 // AI-enhances a draft Facebook post message using business context
@@ -122,12 +120,10 @@ Return ONLY the enhanced post text. No explanations, no quotes.`;
 
 router.get('/connections', authenticateToken, async (req, res) => {
   try {
-    // Ensure userId is consistently an integer (matches Facebook OAuth flow)
-    const userId = parseInt(req.user.userId);
+    // Use string userId directly (no parsing needed)
+    const userId = req.user.userId;
     console.log('🔍 Loading connections for user:', userId);
-    console.log('🔍 Original userId from token:', req.user.userId);
-    console.log('🔍 Parsed userId:', userId);
-    
+
     const rows = await dynamodb.getUserSocialConnections(userId);
     console.log('📊 Raw connections from DB:', rows);
 
@@ -263,12 +259,33 @@ router.get('/facebook/callback', async (req, res) => {
 
     // Get pages the user manages
     console.log('📋 Fetching Facebook pages...');
-    const pagesRes = await axios.get('https://graph.facebook.com/v18.0/me/accounts', {
-      params: { access_token: longLivedToken },
-    });
-    const pages = pagesRes.data.data || [];
-    console.log(`📄 Found ${pages.length} pages`);
-    console.log('📊 Pages data:', JSON.stringify(pages, null, 2));
+    let pages = [];
+    try {
+      const pagesRes = await axios.get('https://graph.facebook.com/v18.0/me/accounts', {
+        params: { 
+          access_token: longLivedToken,
+          fields: 'id,name,access_token,tasks' 
+        },
+      });
+      pages = pagesRes.data.data || [];
+      console.log(`📄 Found ${pages.length} pages`);
+      console.log('📊 Pages data:', JSON.stringify(pages, null, 2));
+      
+      if (pages.length === 0) {
+        console.log('⚠️  No pages found. Possible causes:');
+        console.log('   • User is not an admin/editor of any Facebook pages');
+        console.log('   • Pages are not published');
+        console.log('   • Insufficient permissions in OAuth token');
+        console.log('   • Facebook app may need to be reviewed for page access');
+      }
+    } catch (pagesError) {
+      console.error('❌ Error fetching Facebook pages:', pagesError.response?.data || pagesError.message);
+      console.log('💡 This might be due to:');
+      console.log('   • Missing page permissions in OAuth scope');
+      console.log('   • Facebook app not approved for page access');
+      console.log('   • Token expired or invalid');
+      pages = []; // Fallback to empty array
+    }
 
     let pageId = null;
     let pageName = null;
@@ -310,12 +327,24 @@ router.get('/facebook/callback', async (req, res) => {
 
     // Store Facebook connection
     console.log('💾 Saving Facebook connection to DynamoDB...');
-    await dynamodb.createOrUpdateSocialConnection(userId, 'facebook', {
-      access_token: pageToken || longLivedToken,
-      platform_page_id: pageId,
-      platform_page_name: pageName || 'Facebook Page',
-      extra_data: JSON.stringify({ pages, instagramAccountId })
-    });
+    
+    // If no pages found, we can't post - save connection but mark it as incomplete
+    if (!pageId) {
+      console.log('⚠️  No Facebook pages found - user needs to create a Business Page first');
+      await dynamodb.createOrUpdateSocialConnection(userId, 'facebook', {
+        access_token: longLivedToken,
+        platform_page_id: 'me',
+        platform_page_name: 'Personal Feed (Cannot Post)',
+        extra_data: JSON.stringify({ pages, instagramAccountId, needsBusinessPage: true })
+      });
+    } else {
+      await dynamodb.createOrUpdateSocialConnection(userId, 'facebook', {
+        access_token: pageToken || longLivedToken,
+        platform_page_id: pageId,
+        platform_page_name: pageName,
+        extra_data: JSON.stringify({ pages, instagramAccountId })
+      });
+    }
     console.log('✅ Facebook connection saved successfully');
 
     // Store Instagram connection if available
@@ -336,6 +365,78 @@ router.get('/facebook/callback', async (req, res) => {
     console.error('❌ Facebook OAuth callback error:', err.response?.data || err.message);
     console.error('❌ Full error details:', err);
     res.redirect(`${frontendUrl}/connect-accounts?error=facebook_failed`);
+  }
+});
+
+// ─── GET /api/social/facebook/debug ─────────────────────────────────────────
+// Debug endpoint to check Facebook connection details
+
+router.get('/facebook/debug', authenticateToken, async (req, res) => {
+  try {
+    const connection = await dynamodb.getUserSocialConnection(req.user.userId, 'facebook');
+    if (!connection) {
+      return res.json({ 
+        status: 'not_connected',
+        message: 'No Facebook connection found'
+      });
+    }
+
+    const extraData = connection.extra_data ? JSON.parse(connection.extra_data) : {};
+    const canPost = connection.platform_page_id && connection.platform_page_id !== 'me';
+
+    res.json({
+      status: canPost ? 'ready_to_post' : 'needs_business_page',
+      connection: {
+        platform: connection.platform,
+        pageId: connection.platform_page_id,
+        pageName: connection.platform_page_name,
+        connectedAt: connection.created_at || connection.updated_at,
+        hasAccessToken: !!connection.access_token
+      },
+      extraData: {
+        availablePages: extraData.pages?.length || 0,
+        pagesData: extraData.pages || [],
+        instagramLinked: !!extraData.instagramAccountId,
+        needsBusinessPage: extraData.needsBusinessPage || !connection.platform_page_id
+      },
+      diagnosis: {
+        canPost,
+        issue: canPost ? null : 'No Facebook Business Page connected. Create a Business Page and reconnect.',
+        recommendation: canPost 
+          ? 'Connection is ready for posting!'
+          : 'Visit https://www.facebook.com/pages/create to create a Business Page, then reconnect your account.'
+      }
+    });
+  } catch (err) {
+    console.error('Facebook debug error:', err);
+    res.status(500).json({ error: 'Failed to check Facebook connection' });
+  }
+});
+
+// ─── GET /api/social/facebook/connection-status ─────────────────────────────
+// Check Facebook connection status and whether user needs a business page
+
+router.get('/facebook/connection-status', authenticateToken, async (req, res) => {
+  try {
+    const connection = await dynamodb.getUserSocialConnection(req.user.userId, 'facebook');
+    if (!connection) {
+      return res.json({ connected: false });
+    }
+
+    const extraData = connection.extra_data ? JSON.parse(connection.extra_data) : {};
+    const needsBusinessPage = connection.platform_page_id === 'me' || extraData.needsBusinessPage;
+
+    res.json({
+      connected: true,
+      canPost: !needsBusinessPage,
+      needsBusinessPage,
+      pageName: connection.platform_page_name,
+      pageId: connection.platform_page_id,
+      pagesAvailable: extraData.pages?.length || 0
+    });
+  } catch (err) {
+    console.error('Facebook connection status error:', err);
+    res.status(500).json({ error: 'Failed to check connection status' });
   }
 });
 
@@ -473,17 +574,17 @@ async function getUserQuota(userId) {
     ]);
 
     const limits = isProUser ? {
-      content_generate: { monthly: 15 },
+      content_generate: { monthly: 500 },
       post_enhance: { daily: 100 },
       image_generate: { monthly: 75 },
       caption_generate: { daily: 75 },
       email_write: { daily: 75 },
     } : {
-      content_generate: { monthly: 5 },
+      content_generate: { monthly: 200 },
       post_enhance: { daily: 30 },
-      image_generate: { monthly: 25 },
-      caption_generate: { daily: 25 },
-      email_write: { daily: 25 },
+      image_generate: { monthly: 30 },
+      caption_generate: { daily: 30 },
+      email_write: { daily: 30 },
     };
 
     const extraImageCredits = user?.extra_image_credits || 0;
@@ -718,11 +819,19 @@ router.post('/facebook/verify-credit-purchase', authenticateToken, async (req, r
 
 router.post('/facebook/post', authenticateToken, upload.single('image'), async (req, res) => {
   try {
-    // Ensure userId is consistently an integer (matches Facebook OAuth flow)
-    const userId = parseInt(req.user.userId);
+    // Use string userId directly (no parsing needed)
+    const userId = req.user.userId;
     const connection = await dynamodb.getUserSocialConnection(userId, 'facebook');
     if (!connection) {
       return res.status(400).json({ error: 'Facebook account not connected' });
+    }
+
+    // Check if user is trying to post to personal feed instead of business page
+    if (connection.platform_page_id === 'me' || !connection.platform_page_id) {
+      return res.status(400).json({ 
+        error: 'Cannot post to personal Facebook feed. Please create a Facebook Business Page and reconnect your account.',
+        needsBusinessPage: true
+      });
     }
 
     const message = (req.body.message || '').trim();
@@ -893,8 +1002,8 @@ router.post('/publish/:contentId', authenticateToken, async (req, res) => {
   }
 
   try {
-    // Ensure userId is consistently an integer (matches OAuth flows)
-    const userId = parseInt(req.user.userId);
+    // Use string userId directly 
+    const userId = req.user.userId;
     const businesses = await dynamodb.getUserBusinesses(userId);
     if (!businesses || businesses.length === 0) return res.status(404).json({ error: 'Business not found' });
 
@@ -955,8 +1064,8 @@ router.post('/publish/:contentId', authenticateToken, async (req, res) => {
 
 router.delete('/connections/:platform', authenticateToken, async (req, res) => {
   try {
-    // Ensure userId is consistently an integer (matches OAuth flows)
-    const userId = parseInt(req.user.userId);
+    // Use string userId directly
+    const userId = req.user.userId;
     await dynamodb.deleteSocialConnection(userId, req.params.platform);
     res.json({ message: `${req.params.platform} disconnected successfully` });
   } catch (err) {
@@ -1096,6 +1205,645 @@ async function publishToFacebook(connection, contentItem) {
       access_token: connection.access_token,
     }
   );
+}
+
+// ─── SCHEDULED POSTS ROUTES ──────────────────────────────────────────────
+
+// Schedule a single post
+router.post('/schedule-post', authenticateToken, async (req, res) => {
+  try {
+    const { message, scheduled_time, platform, image_url, image_source } = req.body;
+    
+    if (!message || !scheduled_time || !platform) {
+      return res.status(400).json({ error: 'message, scheduled_time, and platform are required' });
+    }
+    
+    // Validate scheduled time is in the future
+    if (new Date(scheduled_time) <= new Date()) {
+      return res.status(400).json({ error: 'scheduled_time must be in the future' });
+    }
+    
+    const post = {
+      user_id: req.user.userId,
+      post_id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      scheduled_time,
+      platform,
+      content: { 
+        message, 
+        image_url: image_url || null,
+        image_source: image_source || 'none'
+      },
+      status: 'pending',
+      created_at: new Date().toISOString()
+    };
+    
+    await dynamodb.putScheduledPost(post);
+    
+    res.json({ 
+      success: true, 
+      post_id: post.post_id, 
+      scheduled_time: post.scheduled_time,
+      message: 'Post scheduled successfully'
+    });
+  } catch (error) {
+    console.error('Schedule post error:', error);
+    res.status(500).json({ error: 'Failed to schedule post' });
+  }
+});
+
+// Get user's scheduled posts
+router.get('/scheduled-posts', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId; // Use string user_id directly
+    const posts = await dynamodb.getUserScheduledPosts(userId);
+    res.json({ posts });
+  } catch (error) {
+    console.error('Get scheduled posts error:', error);
+    res.json({ posts: [] });
+  }
+});
+
+// Delete scheduled post
+router.delete('/scheduled-posts/:postId', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    // Get the post first to check for images that need cleanup
+    const posts = await dynamodb.getUserScheduledPosts(userId);
+    const postToDelete = posts.find(p => p.post_id === req.params.postId);
+    
+    if (postToDelete) {
+      // Clean up S3 images if they exist
+      await cleanupPostImages([postToDelete]);
+    }
+    
+    await dynamodb.deleteScheduledPost(userId, req.params.postId);
+    res.json({ success: true, message: 'Scheduled post deleted successfully' });
+  } catch (error) {
+    console.error('Delete scheduled post error:', error);
+    res.status(500).json({ error: 'Failed to delete scheduled post' });
+  }
+});
+
+// Delete ALL scheduled posts for user
+router.delete('/scheduled-posts', authenticateToken, async (req, res) => {
+  try {
+    const { category } = req.query;
+    const userId = req.user.userId;
+
+    // Get posts first to clean up images
+    const allPosts = await dynamodb.getUserScheduledPosts(userId);
+    const postsToDelete = category 
+      ? allPosts.filter(p => p.business_category === category)
+      : allPosts;
+    
+    // Clean up S3 images
+    await cleanupPostImages(postsToDelete);
+
+    await dynamodb.deleteUserScheduledPosts(userId, category || null);
+
+    const message = category
+      ? `All ${category} scheduled posts deleted successfully`
+      : 'All scheduled posts deleted successfully';
+
+    res.json({ success: true, message });
+  } catch (error) {
+    console.error('Delete all scheduled posts error:', error);
+    res.status(500).json({ error: 'Failed to delete scheduled posts' });
+  }
+});
+
+// Helper function to clean up S3 images from posts
+async function cleanupPostImages(posts) {
+  if (!posts || posts.length === 0) return;
+  
+  const s3Service = require('../services/s3');
+  const imagesToDelete = [];
+  
+  // Extract S3 keys from posts
+  posts.forEach(post => {
+    const imageUrl = post.content?.image_url || post.image_url;
+    if (imageUrl && imageUrl.includes('amazonaws.com')) {
+      try {
+        // Extract S3 key from URL
+        // Expected format: https://bucket-name.s3.region.amazonaws.com/path/to/image.jpg
+        const url = new URL(imageUrl);
+        const key = url.pathname.substring(1); // Remove leading '/'
+        if (key) {
+          imagesToDelete.push(key);
+        }
+      } catch (error) {
+        console.warn('Failed to parse S3 URL:', imageUrl, error.message);
+      }
+    }
+  });
+  
+  // Delete images from S3
+  if (imagesToDelete.length > 0) {
+    try {
+      await s3Service.deleteImages(imagesToDelete);
+      console.log(`Cleaned up ${imagesToDelete.length} images from S3`);
+    } catch (error) {
+      console.error('Failed to cleanup S3 images:', error);
+      // Don't throw error - post deletion should succeed even if image cleanup fails
+    }
+  }
+}
+
+// Test endpoint to manually trigger scheduled post processing
+router.post('/process-scheduled-posts', authenticateToken, async (req, res) => {
+  try {
+    const posts = await dynamodb.getPostsToPublish();
+    console.log(`Found ${posts.length} posts ready to publish`);
+    
+    const results = [];
+    for (const post of posts) {
+      try {
+        const connection = await dynamodb.getUserSocialConnection(post.user_id, post.platform);
+        if (!connection) {
+          console.error(`No ${post.platform} connection found for user ${post.user_id}`);
+          results.push({
+            post_id: post.post_id,
+            success: false,
+            error: `No ${post.platform} connection found. Please connect your ${post.platform} page first.`
+          });
+          continue;
+        }
+
+        if (!connection.platform_page_id) {
+          console.error(`No page ID found for ${post.platform} connection for user ${post.user_id}`);
+          results.push({
+            post_id: post.post_id,
+            success: false,
+            error: `No ${post.platform} page ID configured. Please reconnect your ${post.platform} page.`
+          });
+          continue;
+        }
+        
+        // Use existing Facebook posting logic
+        if (post.platform === 'facebook') {
+          let platformPostId;
+
+          try {
+            if (post.content.image_url) {
+              // Post with image
+              console.log(`[Scheduled] Posting with image for post ${post.post_id}`);
+              const photoRes = await axios.post(
+                `https://graph.facebook.com/v18.0/${connection.platform_page_id}/photos`,
+                {
+                  url: post.content.image_url,
+                  message: post.content.message,
+                  access_token: connection.access_token
+                }
+              );
+              platformPostId = photoRes.data.post_id || photoRes.data.id;
+            } else {
+              // Text-only post
+              console.log(`[Scheduled] Posting text-only for post ${post.post_id}`);
+              const feedRes = await axios.post(
+                `https://graph.facebook.com/v18.0/${connection.platform_page_id}/feed`,
+                {
+                  message: post.content.message,
+                  access_token: connection.access_token
+                }
+              );
+              platformPostId = feedRes.data.id;
+            }
+
+            console.log(`[Scheduled] Successfully posted to Facebook: ${platformPostId}`);
+          } catch (fbError) {
+            console.error(`[Scheduled] Facebook post error for post ${post.post_id}:`, fbError.response?.data || fbError.message);
+            results.push({
+              post_id: post.post_id,
+              success: false,
+              error: fbError.response?.data?.error?.message || 'Failed to post to Facebook'
+            });
+            continue;
+          }
+
+          // CRITICAL: Log the post for billing/metrics (same as manual posts)
+          await dynamodb.logSocialPost(post.user_id, 'facebook', {
+            platform_post_id: platformPostId,
+            message: post.content.message,
+            has_image: !!post.content.image_url,
+            image_source: post.content.image_source || 'scheduled',
+            scheduled: true // Mark as scheduled post
+          });
+        }
+        
+        // Mark as posted
+        await dynamodb.updateScheduledPostStatus(post.user_id, post.post_id, 'posted');
+        results.push({ post_id: post.post_id, status: 'posted' });
+        
+      } catch (error) {
+        console.error(`Failed to post ${post.post_id}:`, error.message);
+        await dynamodb.updateScheduledPostStatus(post.user_id, post.post_id, 'failed', error.message);
+        results.push({ post_id: post.post_id, status: 'failed', error: error.message });
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      processed_count: posts.length,
+      results 
+    });
+  } catch (error) {
+    console.error('Process scheduled posts error:', error);
+    res.status(500).json({ error: 'Failed to process scheduled posts' });
+  }
+});
+
+// ─── BULK SCHEDULING ROUTES ──────────────────────────────────────────────
+
+const BUSINESS_TEMPLATES = require('../config/business-templates');
+
+// Get available business category templates
+router.get('/business-templates', authenticateToken, (req, res) => {
+  try {
+    // Return template structure without the full prompts (for UI display)
+    const templates = {};
+    Object.keys(BUSINESS_TEMPLATES).forEach(category => {
+      templates[category] = {
+        name: BUSINESS_TEMPLATES[category].name,
+        templates: BUSINESS_TEMPLATES[category].templates.map(t => ({
+          id: t.id,
+          name: t.name,
+          content_type: t.content_type,
+          schedule: t.schedule
+        }))
+      };
+    });
+    res.json({ templates });
+  } catch (error) {
+    console.error('Get business templates error:', error);
+    res.status(500).json({ error: 'Failed to get business templates' });
+  }
+});
+
+// Generate and schedule bulk posts for a business category
+router.post('/schedule-bulk', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      business_category, 
+      start_date, 
+      duration_days = 30, 
+      platforms = ['facebook'],
+      image_option = 'none',
+      include_logo = false 
+    } = req.body;
+    
+    if (!business_category || !start_date) {
+      return res.status(400).json({ error: 'business_category and start_date are required' });
+    }
+
+    if (!BUSINESS_TEMPLATES[business_category]) {
+      return res.status(400).json({ error: `Invalid business category: ${business_category}` });
+    }
+
+    // Get user's business info for personalized content
+    const businesses = await dynamodb.getUserBusinesses(req.user.userId);
+    const business = businesses && businesses.length > 0 ? businesses[0] : null;
+    
+    if (!business) {
+      return res.status(404).json({ error: 'Business profile not found. Complete your setup first.' });
+    }
+
+    // Check quota - bulk scheduling is a premium feature
+    const userQuota = await getUserQuota(req.user.userId);
+    if (userQuota.plan === 'trial') {
+      return res.status(403).json({ error: 'Bulk scheduling is not available on trial. Upgrade to Basic or Pro plan.' });
+    }
+
+    console.log(`Generating ${duration_days} days of content for ${business_category} with images: ${image_option}...`);
+    
+    // Generate scheduled posts
+    const scheduledPosts = await generateBulkScheduledPosts(
+      req.user.userId, // Keep as string for quota lookup
+      business,
+      business_category,
+      new Date(start_date),
+      duration_days,
+      platforms,
+      image_option,
+      include_logo
+    );
+
+    // Convert user_id to number for DynamoDB storage (scheduled_posts table schema)
+    const scheduledPostsForDB = scheduledPosts.map(post => ({
+      ...post,
+      user_id: req.user.userId // Use string user_id directly
+    }));
+
+    // Clear existing scheduled posts for this category (if any) and cleanup images
+    const existingPosts = await dynamodb.getUserScheduledPosts(req.user.userId);
+    const postsToReplace = existingPosts.filter(p => p.business_category === business_category);
+    await cleanupPostImages(postsToReplace);
+    await dynamodb.deleteUserScheduledPosts(req.user.userId, business_category);
+
+    // Bulk insert new posts (with string user_id for DB)
+    if (scheduledPostsForDB.length > 0) {
+      await dynamodb.bulkInsertScheduledPosts(scheduledPostsForDB);
+    }
+
+    // Save schedule configuration (with string user_id for DB)
+    const templateConfig = BUSINESS_TEMPLATES[business_category];
+    await dynamodb.savePostingSchedule(req.user.userId, business_category, {
+      templates_used: templateConfig.templates.map(t => t.id),
+      start_date,
+      duration_days,
+      platforms,
+      image_option,
+      include_logo,
+      generated_at: new Date().toISOString()
+    });
+
+    res.json({
+      success: true,
+      scheduled_posts_count: scheduledPosts.length,
+      duration_days,
+      start_date,
+      business_category,
+      image_option,
+      message: `Successfully scheduled ${scheduledPosts.length} posts over ${duration_days} days`
+    });
+
+  } catch (error) {
+    console.error('Bulk scheduling error:', error);
+    res.status(500).json({ error: 'Failed to generate bulk schedule' });
+  }
+});
+
+// Helper function to generate bulk scheduled posts
+async function generateBulkScheduledPosts(userId, business, businessCategory, startDate, durationDays, platforms, imageOption = 'none', includeLogo = false) {
+  const templates = BUSINESS_TEMPLATES[businessCategory].templates;
+  const scheduledPosts = [];
+  
+  // Generate posts for each day
+  for (let dayOffset = 0; dayOffset < durationDays; dayOffset++) {
+    const currentDate = new Date(startDate);
+    currentDate.setDate(startDate.getDate() + dayOffset);
+    const dayOfWeek = currentDate.getDay(); // 0 = Sunday, 1 = Monday, etc.
+    
+    let dayHasPosts = false;
+    
+    // First, check each template to see if it naturally should post on this day
+    for (const template of templates) {
+      const shouldPost = shouldPostToday(template.schedule, dayOfWeek, dayOffset);
+      
+      if (shouldPost) {
+        dayHasPosts = true;
+        // Generate posts for each platform
+        for (const platform of platforms) {
+          for (const time of template.schedule.times) {
+            // Create scheduled time for this post
+            const scheduledTime = new Date(currentDate);
+            const [hours, minutes] = time.split(':');
+            scheduledTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+            
+            // Skip if the scheduled time is in the past
+            if (scheduledTime <= new Date()) {
+              continue;
+            }
+            
+            try {
+              // Generate AI content using existing Bedrock integration
+              const content = await generateTemplateContent(template, business, imageOption, includeLogo, userId);
+              
+              const post = {
+                user_id: userId,
+                post_id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                scheduled_time: scheduledTime.toISOString(),
+                platform,
+                content: {
+                  message: content.message,
+                  image_url: content.image_url || null,
+                  image_source: imageOption
+                },
+                business_category: businessCategory,
+                template_id: template.id,
+                content_type: template.content_type,
+                status: 'pending',
+                created_at: new Date().toISOString()
+              };
+              
+              scheduledPosts.push(post);
+              
+            } catch (contentError) {
+              console.error(`Failed to generate content for template ${template.id}:`, contentError.message);
+              // Continue with other posts even if one fails
+            }
+          }
+        }
+      }
+    }
+    
+    // If no templates naturally posted on this day, ensure at least 1 post by cycling through templates
+    if (!dayHasPosts) {
+      // Pick a template using modulo to cycle through them
+      const templateIndex = dayOffset % templates.length;
+      const forcedTemplate = templates[templateIndex];
+      
+      console.log(`No natural posts for day ${dayOffset + 1}, forcing template: ${forcedTemplate.name}`);
+
+      // Generate posts for each platform using the forced template
+      for (const platform of platforms) {
+        // Use the first time from the template's schedule, or default to 12:00 PM
+        const defaultTime = (forcedTemplate.schedule.times && forcedTemplate.schedule.times[0]) || '12:00';
+        
+        // Create scheduled time for this post
+        const scheduledTime = new Date(currentDate);
+        const [hours, minutes] = defaultTime.split(':');
+        scheduledTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+
+        // Skip if the scheduled time is in the past
+        if (scheduledTime <= new Date()) {
+          continue;
+        }
+
+        try {
+          // Generate AI content using existing Bedrock integration
+          const content = await generateTemplateContent(forcedTemplate, business, imageOption, includeLogo, userId);
+
+          const post = {
+            user_id: userId,
+            post_id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+            scheduled_time: scheduledTime.toISOString(),
+            platform,
+            content: {
+              message: content.message,
+              image_url: content.image_url || null,
+              image_source: imageOption
+            },
+            business_category: businessCategory,
+            template_id: forcedTemplate.id,
+            content_type: forcedTemplate.content_type,
+            status: 'pending',
+            created_at: new Date().toISOString()
+          };
+
+          scheduledPosts.push(post);
+          
+        } catch (contentError) {
+          console.error(`Failed to generate forced content for template ${forcedTemplate.id}:`, contentError.message);
+          // Continue even if forced post fails
+        }
+      }
+    }
+  }
+  
+  return scheduledPosts;
+}
+
+// Helper function to determine if a template should post today
+function shouldPostToday(schedule, dayOfWeek, dayOffset) {
+  if (schedule.frequency === 'daily') {
+    return true;
+  }
+  
+  if (schedule.frequency === 'weekly') {
+    // Check if today's day of the week matches the schedule
+    return schedule.days_of_week && schedule.days_of_week.includes(dayOfWeek);
+  }
+  
+  return false;
+}
+
+// Helper function to generate content using AI
+async function generateTemplateContent(template, business, imageOption = 'none', includeLogo = false, userId = null) {
+  // Check user quota first if userId is provided
+  if (userId) {
+    const userQuota = await getUserQuota(userId);
+    
+    // Check content generation quota
+    if (userQuota.quotas.content_generate.remaining <= 0) {
+      throw new Error(userQuota.plan === 'trial' 
+        ? 'Trial content generation limit reached. Upgrade to continue.'
+        : `No content credits remaining. Your monthly ${userQuota.quotas.content_generate.limit} resets on the 1st.`
+      );
+    }
+
+    // Check image generation quota if images are requested
+    if (imageOption === 'pexels' && userQuota.quotas.image_generate.remaining <= 0) {
+      throw new Error(userQuota.plan === 'trial'
+        ? 'Trial image generation limit reached. Upgrade to continue.'
+        : `No image credits remaining. Your monthly ${userQuota.quotas.image_generate.limit} resets on the 1st, or buy a top-up pack.`
+      );
+    }
+  }
+  // Replace business placeholders in the prompt
+  let prompt = template.prompt.replace(/{business_name}/g, business.business_name);
+  
+  // Add business context
+  const contextualPrompt = `${prompt}
+
+Business Context:
+- Business Name: ${business.business_name}
+- Business Type: ${business.business_type}
+- Description: ${business.description || 'Local business'}
+- Tone: ${business.tone || 'friendly'}
+- Target Audience: ${business.target_audience || 'local customers'}
+
+Create authentic, engaging content that matches the business voice and appeals to their audience.`;
+
+  // Generate the text content
+  const message = await bedrock.generateContent(contextualPrompt, 200);
+  
+  let imageUrl = null;
+  
+  // Handle image generation if requested
+  if (imageOption === 'pexels') {
+    try {
+      // Create strategy-specific search query like the frontend does
+      const baseCategory = business.business_type.toLowerCase();
+      
+      // Map template types to specific search terms (same as frontend)
+      const searchMappings = {
+        'daily_special': `${baseCategory} food special dish menu`,
+        'behind_the_scenes': `${baseCategory} kitchen staff working behind scenes`,
+        'weekend_promotion': `${baseCategory} happy crowd weekend celebration`,
+        'customer_reviews': `${baseCategory} happy customers dining smiling`,
+        'menu_highlight': `${baseCategory} delicious food plate presentation`,
+        'community_event': `${baseCategory} community event gathering people`,
+        'seasonal_special': `${baseCategory} seasonal food fresh ingredients`,
+        'team_spotlight': `${baseCategory} team staff professional portrait`,
+        'ambiance': `${baseCategory} interior atmosphere cozy lighting`,
+        'new_arrival': `${baseCategory} new product display fresh`,
+        'customer_spotlight': `${baseCategory} satisfied customer testimonial`
+      };
+      
+      // Use strategy-specific search or fallback to generic
+      const searchQuery = searchMappings[template.id] || `${baseCategory} ${template.content_type} professional`;
+      console.log(`Searching Pexels for: ${searchQuery}`);
+
+      const axios = require('axios');
+
+      // Search Pexels with more results for variety
+      const pexelsResponse = await axios.get('https://api.pexels.com/v1/search', {
+        headers: {
+          'Authorization': process.env.PEXELS_API_KEY
+        },
+        params: {
+          query: searchQuery,
+          per_page: 20, // Get more photos to choose from
+          orientation: 'landscape'
+        }
+      });
+
+      if (pexelsResponse.data.photos && pexelsResponse.data.photos.length > 0) {
+        // Randomly select a photo instead of always using the first one
+        const randomIndex = Math.floor(Math.random() * pexelsResponse.data.photos.length);
+        const photo = pexelsResponse.data.photos[randomIndex];
+        
+        // Download and store in S3 (with optional logo stamping)
+        const s3Service = require('../services/s3');
+        const storedImage = await s3Service.storePexelsPhoto(photo.src.large, {
+          photoId: photo.id,
+          photographer: photo.photographer,
+          includeLogo: includeLogo,
+          userId: business.user_id
+        });
+        
+        imageUrl = storedImage.url;
+        console.log(`Generated image for post: ${imageUrl}`);
+      }
+    } catch (error) {
+      console.error('Failed to generate image:', error);
+      // Continue without image if there's an error
+    }
+  }
+  
+  // Log usage and consume credits if userId is provided
+  if (userId) {
+    // Log content generation
+    const userQuota = await getUserQuota(userId);
+    const contentLogType = userQuota.plan === 'trial' ? 'content_generate_trial' : 'content_generate';
+    await dynamodb.incrementUsageLog(userId, contentLogType, { 
+      template_id: template.id,
+      business_category: business.business_type,
+      scheduled: true
+    });
+
+    // Log image generation if image was created
+    if (imageOption === 'pexels' && imageUrl) {
+      const imageLogType = userQuota.plan === 'trial' ? 'image_generate_trial' : 'image_generate';
+      await dynamodb.incrementUsageLog(userId, imageLogType, { 
+        template_id: template.id,
+        source: 'pexels',
+        scheduled: true
+      });
+
+      // Deduct extra credits if monthly quota exhausted (paid users only)
+      if (userQuota.plan !== 'trial' && userQuota.quotas.image_generate.remaining === userQuota.quotas.image_generate.extra_credits && userQuota.quotas.image_generate.extra_credits > 0) {
+        const user = await dynamodb.getUserById(userId);
+        await dynamodb.updateUserCredits(userId, (user.extra_image_credits || 0) - 1);
+      }
+    }
+  }
+  
+  return {
+    message,
+    image_url: imageUrl
+  };
 }
 
 module.exports = router;

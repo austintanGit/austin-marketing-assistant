@@ -1,4 +1,6 @@
 const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const axios = require('axios');
+const sharp = require('sharp');
 
 const client = new S3Client({
   region: process.env.AWS_REGION || 'us-east-1',
@@ -64,4 +66,91 @@ function cdnUrl(fullKey) {
   return `${CDN_BASE}/${fullKey}`;
 }
 
-module.exports = { uploadBuffer, downloadBuffer, deleteKey, urlToKey, cdnUrl, APP_FOLDER };
+/**
+ * Download and process a Pexels photo, optionally adding logo stamp
+ */
+async function storePexelsPhoto(imageUrl, options = {}) {
+  const { photoId, photographer, includeLogo = false, userId } = options;
+  
+  try {
+    // Download the image
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    let imageBuffer = Buffer.from(response.data);
+    
+    // Process with Sharp for optimization and optional logo stamping
+    let sharp_image = sharp(imageBuffer);
+    
+    // Resize to optimal social media dimensions (1200x630 for Facebook)
+    sharp_image = sharp_image.resize(1200, 630, { 
+      fit: 'cover',
+      position: 'center'
+    });
+    
+    // Add logo stamp if requested
+    if (includeLogo && userId) {
+      try {
+        // Try to load user's logo
+        const logoKey = `${APP_FOLDER}/logos/${userId}/logo.png`;
+        const logoBuffer = await downloadBuffer(logoKey);
+        
+        // Create a watermark in the bottom right corner
+        const logoOverlay = await sharp(logoBuffer)
+          .resize(120, 120, { fit: 'inside', withoutEnlargement: true })
+          .png()
+          .toBuffer();
+          
+        sharp_image = sharp_image.composite([{
+          input: logoOverlay,
+          gravity: 'southeast',
+          blend: 'over'
+        }]);
+      } catch (error) {
+        console.log('Could not add logo watermark:', error.message);
+        // Continue without logo if there's an error
+      }
+    }
+    
+    // Convert to JPEG for better compression
+    const processedBuffer = await sharp_image
+      .jpeg({ quality: 85 })
+      .toBuffer();
+    
+    // Generate unique key
+    const key = `pexels/${userId || 'shared'}/${Date.now()}-${photoId}.jpg`;
+    
+    // Upload to S3
+    const cdnUrl = await uploadBuffer(processedBuffer, key, 'image/jpeg');
+    
+    return {
+      url: cdnUrl,
+      photoId,
+      photographer,
+      processedAt: new Date().toISOString()
+    };
+    
+  } catch (error) {
+    console.error('Failed to store Pexels photo:', error);
+    throw error;
+  }
+}
+
+/**
+ * Delete multiple images from S3
+ * @param {string[]} keys - Array of S3 keys to delete
+ */
+async function deleteImages(keys) {
+  if (!keys || keys.length === 0) return;
+  
+  console.log(`Deleting ${keys.length} images from S3:`, keys);
+  
+  const deletePromises = keys.map(key => {
+    return deleteKey(key).catch(error => {
+      console.warn(`Failed to delete S3 key ${key}:`, error.message);
+      // Don't throw - continue with other deletions
+    });
+  });
+  
+  await Promise.all(deletePromises);
+}
+
+module.exports = { uploadBuffer, downloadBuffer, deleteKey, urlToKey, cdnUrl, APP_FOLDER, storePexelsPhoto, deleteImages };

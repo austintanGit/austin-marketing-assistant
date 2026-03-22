@@ -1,0 +1,24 @@
+console.log('🎯 Create Your Own Facebook Test Page');
+console.log('===================================\n');
+
+console.log('Since you lost access to "Tan Estates Manage", create your own:');
+console.log('');
+console.log('📋 Steps:');
+console.log('1. Go to: https://www.facebook.com/pages/create');
+console.log('2. Choose "Business or Brand"');
+console.log('3. Page details:');
+console.log('   • Name: "Austin Marketing Test" or "Your Business Name"');
+console.log('   • Category: "Marketing Agency" or "Software"'); 
+console.log('   • Description: "Test page for marketing automation"');
+console.log('4. Skip optional steps (photos, etc.) for now');
+console.log('5. IMPORTANT: Make sure to PUBLISH the page');
+console.log('6. In your app: Disconnect Facebook and reconnect');
+console.log('7. Your new page should appear and work immediately');
+console.log('');
+console.log('✅ Benefits of your own page:');
+console.log('   • Full admin control - no one can revoke access');
+console.log('   • Perfect for testing - post as much as you want');
+console.log('   • Can be used for your actual marketing assistant business');
+console.log('   • No dependencies on other people\'s pages');
+console.log('');
+console.log('⏱️  This will take 2-3 minutes and permanently fix the issue!');

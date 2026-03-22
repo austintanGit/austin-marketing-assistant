@@ -15,11 +15,11 @@ export default function Home() {
         <div className="max-w-7xl mx-auto px-4 py-20">
           <div className="text-center text-white">
             <h1 className="text-5xl font-bold mb-6">
-              AI-Powered Marketing for <span className="text-yellow-300">Austin</span> Small Businesses
+              AI-Powered Marketing for <span className="text-yellow-300">Small Businesses</span>
             </h1>
             <p className="text-xl mb-8 max-w-3xl mx-auto">
               Get 30 days of social media posts and custom email content 
-              specifically crafted for your Austin business. Setup takes just 5 minutes.
+              specifically crafted for your local business. Setup takes just 5 minutes.
             </p>
             <div className="flex justify-center space-x-4">
               <Link 
@@ -43,16 +43,16 @@ export default function Home() {
       <div className="py-20 bg-white">
         <div className="max-w-7xl mx-auto px-4">
           <h2 className="text-3xl font-bold text-center mb-12">
-            Built for Austin Businesses
+            Built for Local Businesses
           </h2>
           
           <div className="grid md:grid-cols-3 gap-8">
             <div className="austin-card text-center">
               <SparklesIcon className="h-12 w-12 text-austin-orange mx-auto mb-4" />
-              <h3 className="text-xl font-semibold mb-3">Austin-Smart AI</h3>
+              <h3 className="text-xl font-semibold mb-3">Location-Smart AI</h3>
               <p className="text-gray-600">
-                Mentions local events like SXSW, ACL, and Keep Austin Weird culture. 
-                Your content feels authentically local.
+                Mentions local events, seasonal activities, and community culture. 
+                Your content feels authentically local to your area.
               </p>
             </div>
 
@@ -69,8 +69,8 @@ export default function Home() {
               <MapPinIcon className="h-12 w-12 text-austin-blue mx-auto mb-4" />
               <h3 className="text-xl font-semibold mb-3">Local SEO Focused</h3>
               <p className="text-gray-600">
-                Social media content optimized for Austin searches. 
-                Help locals find your business.
+                Social media content optimized for local searches. 
+                Help customers in your area find your business.
               </p>
             </div>
           </div>
@@ -97,11 +97,11 @@ export default function Home() {
                 </li>
                 <li className="flex items-center">
                   <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />
-                  <span><strong>Austin Event Integration</strong> (SXSW, ACL, local holidays)</span>
+                  <span><strong>Local Event Integration</strong> (community events, seasonal activities)</span>
                 </li>
                 <li className="flex items-center">
                   <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />
-                  <span><strong>Seasonal Content</strong> matching Austin weather & vibes</span>
+                  <span><strong>Seasonal Content</strong> matching local weather & community vibes</span>
                 </li>
                 <li className="flex items-center">
                   <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />
@@ -112,14 +112,14 @@ export default function Home() {
             
             <div className="bg-white p-8 rounded-lg shadow-lg">
               <h3 className="text-2xl font-bold mb-4 text-austin-blue">
-                Perfect for Austin:
+                Perfect for Local Businesses:
               </h3>
               <div className="space-y-3 text-gray-700">
-                <p>🌮 <strong>Food Trucks</strong> - Mention your next stop and local events</p>
-                <p>✂️ <strong>Salons</strong> - Connect with Austin's style scene</p>
-                <p>🍕 <strong>Restaurants</strong> - Highlight local ingredients & vibes</p>
-                <p>🛍️ <strong>Boutiques</strong> - Capture Keep Austin Weird spirit</p>
-                <p>🔧 <strong>Services</strong> - Build trust in local communities</p>
+                <p>🌮 <strong>Food Trucks</strong> - Mention your next location and local events</p>
+                <p>✂️ <strong>Salons</strong> - Connect with your community's style scene</p>
+                <p>🍕 <strong>Restaurants</strong> - Highlight local ingredients & atmosphere</p>
+                <p>🛍️ <strong>Boutiques</strong> - Capture your local community spirit</p>
+                <p>🔧 <strong>Services</strong> - Build trust in your local area</p>
               </div>
             </div>
           </div>
@@ -132,10 +132,10 @@ export default function Home() {
           <div className="text-center text-white">
             <HeartIcon className="h-16 w-16 mx-auto mb-6" />
             <h2 className="text-3xl font-bold mb-4">
-              Keep Austin Local
+              Support Local Business
             </h2>
             <p className="text-xl mb-8 max-w-2xl mx-auto">
-              Join Austin small businesses who are saving 5+ hours per week on marketing 
+              Join small business owners who are saving 5+ hours per week on marketing 
               while growing their local customer base.
             </p>
             <Link 

@@ -9,6 +9,9 @@ import {
   ArrowUpTrayIcon,
   ArrowPathIcon,
   MagnifyingGlassIcon,
+  ClockIcon,
+  CalendarDaysIcon,
+  ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline'
 
 const IMAGE_MODES = [
@@ -46,6 +49,9 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
 
   // Post status
   const [posting, setPosting] = useState(false)
+  const [postMode, setPostMode] = useState('now') // 'now' | 'schedule'
+  const [scheduledDate, setScheduledDate] = useState('')
+  const [scheduledTime, setScheduledTime] = useState('')
 
   // AI assist for message
   const [showAiAssist, setShowAiAssist] = useState(false)
@@ -69,6 +75,16 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       setAiPrompt('')
       setAiImageUrl(null)
       setShowAiAssist(false)
+      setPostMode('now')
+      setScheduledDate('')
+      setScheduledTime('')
+      
+      // Set default to tomorrow at 9 AM for scheduling
+      const tomorrow = new Date()
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      setScheduledDate(tomorrow.toISOString().split('T')[0])
+      setScheduledTime('09:00')
+      
       loadImageQuota()
     }
   }, [isOpen, initialMessage])
@@ -156,7 +172,16 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
     try {
       const res = await api.post('/social/facebook/generate-image', { prompt: aiPrompt, include_logo: includeLogo })
       setAiImageUrl(res.data.image_url)
-      if (res.data.quota) setImageQuota(res.data.quota)
+      
+      // Update the image quota with the new data from the response
+      if (res.data.quota) {
+        setImageQuota({
+          plan: imageQuota?.plan || 'basic',
+          quota: res.data.quota,
+          can_generate: res.data.quota.remaining > 0
+        })
+      }
+      
       toast.success('Image generated!')
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to generate image')
@@ -192,29 +217,74 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
       return
     }
 
+    // Validate scheduling
+    if (postMode === 'schedule') {
+      if (!scheduledDate || !scheduledTime) {
+        toast.error('Please set a date and time for scheduling')
+        return
+      }
+      
+      if (imageMode === 'upload') {
+        toast.error('File uploads are not supported for scheduled posts. Use stock photos or AI generation instead.')
+        return
+      }
+      
+      const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}:00`)
+      if (scheduledDateTime <= new Date()) {
+        toast.error('Scheduled time must be in the future')
+        return
+      }
+    }
+
     setPosting(true)
     try {
-      const formData = new FormData()
-      formData.append('message', message)
-      formData.append('image_source', imageMode)
+      if (postMode === 'now') {
+        // Post immediately
+        const formData = new FormData()
+        formData.append('message', message)
+        formData.append('image_source', imageMode)
 
-      if (imageMode === 'upload' && uploadedFile) {
-        formData.append('image', uploadedFile)
-      } else if (imageMode === 'pexels' && pexelsImageUrl) {
-        formData.append('image_url', pexelsImageUrl)
-      } else if (imageMode === 'ai' && aiImageUrl) {
-        formData.append('image_url', aiImageUrl)
+        if (imageMode === 'upload' && uploadedFile) {
+          formData.append('image', uploadedFile)
+        } else if (imageMode === 'pexels' && pexelsImageUrl) {
+          formData.append('image_url', pexelsImageUrl)
+        } else if (imageMode === 'ai' && aiImageUrl) {
+          formData.append('image_url', aiImageUrl)
+        }
+
+        await api.post('/social/facebook/post', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+        })
+
+        toast.success('Posted to Facebook!')
+      } else {
+        // Schedule post
+        const scheduledDateTime = new Date(`${scheduledDate}T${scheduledTime}:00`)
+        
+        const scheduleData = {
+          message: message.trim(),
+          scheduled_time: scheduledDateTime.toISOString(),
+          platform: 'facebook',
+          image_source: imageMode
+        }
+
+        // Handle image URL for scheduled posts
+        if (imageMode === 'pexels' && pexelsImageUrl) {
+          scheduleData.image_url = pexelsImageUrl
+        } else if (imageMode === 'ai' && aiImageUrl) {
+          scheduleData.image_url = aiImageUrl
+        }
+        // Note: File uploads for scheduled posts would need additional handling
+
+        await api.post('/social/schedule-post', scheduleData)
+        
+        toast.success(`Post scheduled for ${scheduledDateTime.toLocaleString()}!`)
       }
 
-      await api.post('/social/facebook/post', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-
-      toast.success('Posted to Facebook!')
       onPosted?.()
       onClose()
     } catch (err) {
-      const msg = err.response?.data?.error || 'Failed to post to Facebook'
+      const msg = err.response?.data?.error || `Failed to ${postMode === 'now' ? 'post' : 'schedule'} Facebook post`
       toast.error(msg)
     } finally {
       setPosting(false)
@@ -344,6 +414,110 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
               <span className="text-xs text-gray-400">{message.length} / 63,206</span>
             </div>
           </div>
+
+          {/* Post timing mode */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">When to post</label>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setPostMode('now')}
+                className={`flex items-center gap-2 flex-1 px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
+                  postMode === 'now'
+                    ? 'border-blue-500 bg-blue-50 text-blue-700'
+                    : 'border-gray-200 hover:border-gray-300 bg-white text-gray-700'
+                }`}
+              >
+                <SparklesIcon className="h-4 w-4" />
+                Post Now
+              </button>
+              
+              <button
+                onClick={() => setPostMode('schedule')}
+                className={`flex items-center gap-2 flex-1 px-4 py-3 rounded-xl border-2 text-sm font-medium transition-all ${
+                  postMode === 'schedule'
+                    ? 'border-austin-orange bg-orange-50 text-austin-orange'
+                    : 'border-gray-200 hover:border-gray-300 bg-white text-gray-700'
+                }`}
+              >
+                <ClockIcon className="h-4 w-4" />
+                Schedule
+              </button>
+            </div>
+          </div>
+
+          {/* Scheduling options */}
+          {postMode === 'schedule' && (
+            <div className="space-y-4 bg-orange-50 rounded-xl p-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Date</label>
+                  <input
+                    type="date"
+                    value={scheduledDate}
+                    onChange={(e) => setScheduledDate(e.target.value)}
+                    min={new Date().toISOString().split('T')[0]}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-austin-orange"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Time</label>
+                  <input
+                    type="time"
+                    value={scheduledTime}
+                    onChange={(e) => setScheduledTime(e.target.value)}
+                    className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-austin-orange"
+                  />
+                </div>
+              </div>
+              
+              {/* Quick time presets */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Quick times</label>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { label: '9:00 AM', value: '09:00' },
+                    { label: '12:00 PM', value: '12:00' },
+                    { label: '3:00 PM', value: '15:00' },
+                    { label: '6:00 PM', value: '18:00' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.value}
+                      type="button"
+                      onClick={() => setScheduledTime(preset.value)}
+                      className={`text-xs px-3 py-1.5 rounded-lg border transition-colors ${
+                        scheduledTime === preset.value
+                          ? 'border-austin-orange bg-austin-orange text-white font-medium'
+                          : 'border-gray-200 text-gray-600 hover:border-austin-orange hover:text-austin-orange'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Preview scheduled time */}
+              {scheduledDate && scheduledTime && (
+                <div className="flex items-center gap-2 text-sm text-orange-700 bg-orange-100 rounded-lg p-2">
+                  <CalendarDaysIcon className="h-4 w-4" />
+                  <span>
+                    Will post on{' '}
+                    <strong>
+                      {new Date(`${scheduledDate}T${scheduledTime}`).toLocaleString('en-US', {
+                        weekday: 'long',
+                        month: 'long',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        hour12: true
+                      })}
+                    </strong>
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Image mode selector */}
           <div>
@@ -560,41 +734,54 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
             <div className="space-y-3 bg-gray-50 rounded-xl p-4">
 
               {/* Credit progress bar */}
-              {imageQuota && (
+              {imageQuota ? (
                 <div>
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-medium text-gray-600">Image credits</span>
                     <div className="flex items-center gap-2">
                       <span className={`text-xs font-semibold ${imageQuota.can_generate ? 'text-gray-700' : 'text-red-600'}`}>
-                        {imageQuota.total_remaining} remaining
+                        {imageQuota.quota?.remaining || 0} remaining
                       </span>
-                      <button
-                        onClick={handleBuyCredits}
-                        className="text-xs font-medium text-white bg-austin-orange hover:bg-orange-600 px-2 py-0.5 rounded-full transition-colors"
-                      >
-                        + Buy 25 for $2.99
-                      </button>
+                      {(!imageQuota.can_generate || (imageQuota.quota?.remaining || 0) < 5) && (
+                        <button
+                          onClick={handleBuyCredits}
+                          className="text-xs font-medium text-white bg-austin-orange hover:bg-orange-600 px-2 py-0.5 rounded-full transition-colors"
+                        >
+                          + Buy 25 for $2.99
+                        </button>
+                      )}
                     </div>
                   </div>
                   <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all duration-500 ${
-                        imageQuota.can_generate ? 'bg-austin-orange' : 'bg-red-400'
+                        (imageQuota.quota?.remaining || 0) > 5 ? 'bg-green-500' : 
+                        (imageQuota.quota?.remaining || 0) > 0 ? 'bg-yellow-500' : 'bg-red-500'
                       }`}
                       style={{
-                        width: `${Math.max(0, Math.min(100, (imageQuota.total_remaining / (imageQuota.monthly_limit + imageQuota.extra_credits || imageQuota.monthly_limit)) * 100))}%`
+                        width: `${Math.max(5, Math.min(100, ((imageQuota.quota?.remaining || 0) / (imageQuota.quota?.limit || 1)) * 100))}%`
                       }}
                     />
                   </div>
                   <div className="flex justify-between mt-1">
                     <span className="text-xs text-gray-400">
-                      {imageQuota.used_this_month} used this month
+                      {imageQuota.quota?.used || 0}/{imageQuota.quota?.limit || 0} used this month
                     </span>
-                    {imageQuota.extra_credits > 0 && (
+                    {(imageQuota.quota?.extra_credits || 0) > 0 && (
                       <span className="text-xs text-austin-orange font-medium">
-                        +{imageQuota.extra_credits} bonus credits
+                        +{imageQuota.quota.extra_credits} bonus credits
                       </span>
                     )}
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs font-medium text-gray-600">Image credits</span>
+                    <span className="text-xs text-gray-500">Loading...</span>
+                  </div>
+                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-full bg-gray-300 rounded-full animate-pulse w-1/2" />
                   </div>
                 </div>
               )}
@@ -708,7 +895,7 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
                       className="flex items-center gap-1 text-xs text-gray-500 hover:text-austin-orange disabled:opacity-50 transition-colors"
                     >
                       <ArrowPathIcon className="h-3.5 w-3.5" />
-                      Regenerate ({imageQuota.total_remaining} credits left)
+                      Regenerate ({imageQuota.quota?.remaining || 0} credits left)
                     </button>
                   )}
                 </div>
@@ -725,12 +912,25 @@ export default function FacebookPostModal({ isOpen, onClose, initialMessage = ''
           <button
             onClick={handlePost}
             disabled={posting}
-            className="flex items-center gap-2 text-sm font-semibold text-white bg-[#1877F2] hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2.5 rounded-xl transition-colors"
+            className={`flex items-center gap-2 text-sm font-semibold text-white disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2.5 rounded-xl transition-colors ${
+              postMode === 'now' 
+                ? 'bg-[#1877F2] hover:bg-blue-700' 
+                : 'bg-austin-orange hover:bg-orange-600'
+            }`}
           >
-            {posting
-              ? <><ArrowPathIcon className="h-4 w-4 animate-spin" /> Posting…</>
-              : <><FacebookIcon className="w-4 h-4" /> Post to Facebook</>
-            }
+            {posting ? (
+              <><ArrowPathIcon className="h-4 w-4 animate-spin" /> 
+                {postMode === 'now' ? 'Posting…' : 'Scheduling…'}
+              </>
+            ) : (
+              <>
+                {postMode === 'now' ? (
+                  <><FacebookIcon className="w-4 h-4" /> Post to Facebook</>
+                ) : (
+                  <><ClockIcon className="h-4 w-4" /> Schedule Post</>
+                )}
+              </>
+            )}
           </button>
         </div>
       </div>

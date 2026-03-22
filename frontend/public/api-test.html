@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Test - Bulk Scheduling</title>
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 40px; }
+        .container { max-width: 800px; }
+        .test-section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        .success { background: #d4edda; border-color: #c3e6cb; color: #155724; }
+        .error { background: #f8d7da; border-color: #f5c6cb; color: #721c24; }
+        .loading { background: #fff3cd; border-color: #ffeaa7; color: #856404; }
+        pre { background: #f8f9fa; padding: 15px; border-radius: 4px; overflow-x: auto; }
+        button { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        input, select { padding: 8px; margin: 5px; border: 1px solid #ddd; border-radius: 4px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧪 API Testing - Bulk Scheduling with Images</h1>
+        
+        <div class="test-section">
+            <h3>Step 1: Get Auth Token</h3>
+            <p>Your current auth token (from localStorage):</p>
+            <input type="text" id="authToken" placeholder="Will auto-populate from localStorage" style="width: 100%; font-family: monospace;">
+            <button onclick="getAuthToken()">Get Token from localStorage</button>
+        </div>
+
+        <div class="test-section">
+            <h3>Step 2: Test Business Templates</h3>
+            <button onclick="testBusinessTemplates()" id="templatesBtn">Test Templates Endpoint</button>
+            <div id="templatesResult"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>Step 3: Test Bulk Scheduling</h3>
+            <label>Business Category:</label>
+            <select id="businessCategory">
+                <option value="restaurant">Restaurant</option>
+                <option value="retail">Retail</option>
+                <option value="fitness">Fitness</option>
+                <option value="beauty">Beauty</option>
+                <option value="real_estate">Real Estate</option>
+                <option value="automotive">Automotive</option>
+                <option value="healthcare">Healthcare</option>
+                <option value="professional">Professional Services</option>
+                <option value="education">Education</option>
+                <option value="entertainment">Entertainment</option>
+            </select><br>
+            
+            <label>Image Option:</label>
+            <select id="imageOption">
+                <option value="none">No Images</option>
+                <option value="pexels">Pexels Images</option>
+            </select><br>
+            
+            <label>Include Logo:</label>
+            <input type="checkbox" id="includeLogo"><br><br>
+            
+            <button onclick="testBulkScheduling()" id="bulkBtn">Test Bulk Scheduling</button>
+            <div id="bulkResult"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>Step 4: Check Scheduled Posts</h3>
+            <button onclick="checkScheduledPosts()" id="postsBtn">Check Scheduled Posts</button>
+            <div id="postsResult"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.protocol + '//' + window.location.hostname + ':' + window.location.port + '/api';
+        
+        function getAuthToken() {
+            const token = localStorage.getItem('token');
+            document.getElementById('authToken').value = token || 'No token found in localStorage';
+        }
+
+        async function makeAPICall(endpoint, options = {}) {
+            const token = document.getElementById('authToken').value;
+            if (!token || token === 'No token found in localStorage') {
+                throw new Error('Please get a valid auth token first');
+            }
+
+            const defaultOptions = {
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            };
+
+            const response = await fetch(API_BASE + endpoint, {
+                ...defaultOptions,
+                ...options,
+                headers: {
+                    ...defaultOptions.headers,
+                    ...options.headers
+                }
+            });
+
+            if (!response.ok) {
+                const error = await response.text();
+                throw new Error(`HTTP ${response.status}: ${error}`);
+            }
+
+            return response.json();
+        }
+
+        async function testBusinessTemplates() {
+            const resultDiv = document.getElementById('templatesResult');
+            const btn = document.getElementById('templatesBtn');
+            
+            try {
+                btn.disabled = true;
+                resultDiv.innerHTML = '<div class="loading">Testing business templates endpoint...</div>';
+                
+                const result = await makeAPICall('/social/business-templates');
+                
+                resultDiv.innerHTML = `
+                    <div class="success">
+                        <h4>✅ Success!</h4>
+                        <pre>${JSON.stringify(result, null, 2)}</pre>
+                    </div>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Error!</h4>
+                        <p>${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function testBulkScheduling() {
+            const resultDiv = document.getElementById('bulkResult');
+            const btn = document.getElementById('bulkBtn');
+            
+            try {
+                btn.disabled = true;
+                resultDiv.innerHTML = '<div class="loading">Testing bulk scheduling...</div>';
+                
+                const tomorrow = new Date();
+                tomorrow.setDate(tomorrow.getDate() + 1);
+                
+                const payload = {
+                    business_category: document.getElementById('businessCategory').value,
+                    start_date: tomorrow.toISOString().split('T')[0],
+                    duration_days: 2,
+                    platforms: ['facebook'],
+                    image_option: document.getElementById('imageOption').value,
+                    include_logo: document.getElementById('includeLogo').checked
+                };
+
+                console.log('Bulk scheduling payload:', payload);
+                
+                const result = await makeAPICall('/social/schedule-bulk', {
+                    method: 'POST',
+                    body: JSON.stringify(payload)
+                });
+                
+                resultDiv.innerHTML = `
+                    <div class="success">
+                        <h4>✅ Success!</h4>
+                        <pre>${JSON.stringify(result, null, 2)}</pre>
+                    </div>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Error!</h4>
+                        <p>${error.message}</p>
+                        <p>Check the browser console for more details.</p>
+                    </div>
+                `;
+                console.error('Bulk scheduling error:', error);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function checkScheduledPosts() {
+            const resultDiv = document.getElementById('postsResult');
+            const btn = document.getElementById('postsBtn');
+            
+            try {
+                btn.disabled = true;
+                resultDiv.innerHTML = '<div class="loading">Checking scheduled posts...</div>';
+                
+                const result = await makeAPICall('/social/scheduled-posts');
+                
+                resultDiv.innerHTML = `
+                    <div class="success">
+                        <h4>✅ Posts Found: ${result.posts?.length || 0}</h4>
+                        <pre>${JSON.stringify(result, null, 2)}</pre>
+                    </div>
+                `;
+            } catch (error) {
+                resultDiv.innerHTML = `
+                    <div class="error">
+                        <h4>❌ Error!</h4>
+                        <p>${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // Auto-populate token on page load
+        window.addEventListener('load', getAuthToken);
+    </script>
+</body>
+</html>

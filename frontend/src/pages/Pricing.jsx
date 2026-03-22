@@ -14,10 +14,10 @@ export default function Pricing() {
         '200 Credits per month',
         '5 Social post generations per month (10 posts each)',
         '30 Post enhancements per month', 
-        '25 AI image generations per month',
-        '25 Caption generations per month',
-        '25 Email compositions per day',
-        'Austin-specific content',
+        '30 AI image generations per month',
+        '30 Caption generations per month',
+        '30 Email compositions per day',
+        'Location-specific content',
         'Local event integration',
         'Email support'
       ]
@@ -47,7 +47,7 @@ export default function Pricing() {
         {/* Header */}
         <div className="text-center">
           <h2 className="text-3xl font-extrabold text-gray-900 sm:text-4xl">
-            Simple Pricing for Austin Small Businesses
+            Simple Pricing for Small Businesses
           </h2>
           <p className="mt-4 text-xl text-gray-600">
             Start with a free trial, then choose monthly or annual billing
@@ -126,7 +126,7 @@ export default function Pricing() {
                 </li>
                 <li className="flex items-center">
                   <CheckCircleIcon className="h-6 w-6 text-austin-green mr-3" />
-                  <span className="text-gray-700">Austin-specific content</span>
+                  <span className="text-gray-700">Location-specific content</span>
                 </li>
               </ul>
 
@@ -272,13 +272,13 @@ export default function Pricing() {
           <div className="grid md:grid-cols-2 gap-8">
             <div>
               <h4 className="text-lg font-semibold text-red-600 mb-4">
-                ❌ Without Austin Marketing Assistant:
+                ❌ Without Marketing Assistant:
               </h4>
               <ul className="space-y-2 text-gray-600">
                 <li>• Spend 5+ hours weekly creating posts</li>
                 <li>• Hire social media manager: $1,500-3,000/month</li>
                 <li>• Use 3+ different tools: $100-200/month</li>
-                <li>• Generic content that doesn't feel local</li>
+                <li>• Generic content that doesn't connect locally</li>
                 <li>• Miss local events and opportunities</li>
                 <li>• Inconsistent posting schedule</li>
               </ul>
@@ -286,14 +286,14 @@ export default function Pricing() {
             
             <div>
               <h4 className="text-lg font-semibold text-austin-green mb-4">
-                ✅ With Austin Marketing Assistant:
+                ✅ With Marketing Assistant:
               </h4>
               <ul className="space-y-2 text-gray-600">
                 <li>• 5 minutes setup, content ready instantly</li>
                 <li>• Professional marketing content: Starting at ${billingCycle === 'annual' ? '$26' : '$39'}/month</li>
                 <li>• All-in-one solution, no multiple tools</li>
-                <li>• Austin-specific, locally relevant content</li>
-                <li>• Never miss SXSW, ACL, or local events</li>
+                <li>• Location-specific, locally relevant content</li>
+                <li>• Never miss local events and opportunities</li>
                 <li>• Consistent, high-quality posting</li>
                 {billingCycle === 'annual' && (
                   <li>• <strong>Save up to $316/year</strong> with annual billing</li>
@@ -306,7 +306,7 @@ export default function Pricing() {
         {/* Social Proof */}
         <div className="mt-16 text-center">
           <h3 className="text-2xl font-bold text-gray-900 mb-8">
-            Join Austin Businesses Already Saving Time
+            Join Small Businesses Already Saving Time
           </h3>
           
           <div className="grid md:grid-cols-3 gap-6">
@@ -317,7 +317,7 @@ export default function Pricing() {
                 ))}
               </div>
               <p className="text-gray-600 mb-2">
-                "Finally, marketing that actually sounds like Austin!"
+                "Finally, marketing that actually sounds local!"
               </p>
               <p className="text-sm font-semibold">- Local Restaurant Owner</p>
             </div>
@@ -341,7 +341,7 @@ export default function Pricing() {
                 ))}
               </div>
               <p className="text-gray-600 mb-2">
-                "Love how it mentions South by and ACL!"
+                "Love how it mentions local events and seasonal content!"
               </p>
               <p className="text-sm font-semibold">- Boutique Owner</p>
             </div>
@@ -351,7 +351,7 @@ export default function Pricing() {
         {/* Final CTA */}
         <div className="mt-16 austin-gradient rounded-lg p-8 text-center text-white">
           <h3 className="text-2xl font-bold mb-4">
-            Ready to Keep Austin Local?
+            Ready to Grow Your Local Business?
           </h3>
           <p className="text-lg mb-6">
             Start with a free trial (no credit card needed), then choose the plan that fits your business.

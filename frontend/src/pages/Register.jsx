@@ -83,7 +83,7 @@ export default function Register() {
             Get Started Free
           </h2>
           <p className="mt-2 text-center text-sm text-gray-600">
-            Join Austin small businesses saving time on marketing
+            Join small businesses saving time on marketing
           </p>
           {(selectedPlan && selectedPlan !== 'trial') && (
             <div className="mt-4 p-3 bg-austin-green bg-opacity-10 rounded-lg text-center">
@@ -187,8 +187,8 @@ export default function Register() {
 
         <div className="mt-6 p-4 bg-austin-blue bg-opacity-10 rounded-lg">
           <p className="text-xs text-center text-gray-600">
-            🎉 <strong>First month free</strong> for all Austin businesses<br/>
-            No contracts • Cancel anytime • Keep Austin Local
+            🎉 <strong>First month free</strong> for all small businesses<br/>
+            No contracts • Cancel anytime • Support Local Business
           </p>
         </div>
       </div>

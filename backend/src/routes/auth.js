@@ -41,6 +41,21 @@ router.post('/register', async (req, res) => {
     // Create user using DynamoDB
     const result = await dynamodb.createUser(email, passwordHash);
 
+    // Automatically create a 7-day trial subscription for new users
+    const trialEnd = new Date();
+    trialEnd.setDate(trialEnd.getDate() + 7);
+
+    await dynamodb.createOrUpdateSubscription(result.id, {
+      plan: 'trial',
+      billing_cycle: 'trial',
+      status: 'active',
+      current_period_start: new Date().toISOString(),
+      current_period_end: trialEnd.toISOString(),
+      cancel_at_period_end: true // Trial ends automatically
+    });
+
+    console.log(`✅ Created user ${result.id} with automatic 7-day trial`);
+
     // Generate JWT token
     const token = jwt.sign(
       { userId: result.id, email },
@@ -49,9 +64,10 @@ router.post('/register', async (req, res) => {
     );
 
     res.status(201).json({
-      message: 'User created successfully',
+      message: 'User created successfully with 7-day trial',
       token,
-      user: { id: result.id, email }
+      user: { id: result.id, email },
+      trial_end: trialEnd
     });
 
   } catch (error) {
@@ -62,7 +78,7 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ error: 'User already exists with this email' });
     }
     
-    res.status(500).json({ error: 'Failed to create user' });
+    res.status(500).json({ error: 'Failed to create user account' });
   }
 });
 

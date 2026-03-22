@@ -890,6 +890,221 @@ class DynamoDBService {
       throw error;
     }
   }
+
+  // ─── SCHEDULED POSTS METHODS ─────────────────────────────────────────────
+  
+  // Schedule a post (uses separate scheduled_posts_v2 table)
+  async putScheduledPost(postData) {
+    try {
+      return await this.docClient.send(new PutCommand({
+        TableName: 'scheduled_posts_v2',
+        Item: postData
+      }));
+    } catch (error) {
+      console.error('DynamoDB putScheduledPost error:', error);
+      throw error;
+    }
+  }
+
+  // Get user's scheduled posts
+  async getUserScheduledPosts(userId, limit = 50) {
+    try {
+      const result = await this.docClient.send(new QueryCommand({
+        TableName: 'scheduled_posts_v2',
+        KeyConditionExpression: 'user_id = :user_id',
+        ExpressionAttributeValues: {
+          ':user_id': userId
+        },
+        ScanIndexForward: false, // Most recent first
+        Limit: limit
+      }));
+      return result.Items || [];
+    } catch (error) {
+      console.error('DynamoDB getUserScheduledPosts error:', error);
+      return [];
+    }
+  }
+
+  // Update scheduled post status
+  async updateScheduledPostStatus(userId, postId, status, errorMessage = null) {
+    try {
+      const updateParams = {
+        TableName: 'scheduled_posts_v2',
+        Key: {
+          user_id: userId,
+          post_id: postId
+        },
+        UpdateExpression: 'SET #status = :status, updated_at = :updated_at',
+        ExpressionAttributeNames: {
+          '#status': 'status'
+        },
+        ExpressionAttributeValues: {
+          ':status': status,
+          ':updated_at': new Date().toISOString()
+        }
+      };
+
+      if (errorMessage) {
+        updateParams.UpdateExpression += ', error_message = :error';
+        updateParams.ExpressionAttributeValues[':error'] = errorMessage;
+      }
+
+      return await this.docClient.send(new UpdateCommand(updateParams));
+    } catch (error) {
+      console.error('DynamoDB updateScheduledPostStatus error:', error);
+      throw error;
+    }
+  }
+
+  // Delete scheduled post
+  async deleteScheduledPost(userId, postId) {
+    try {
+      return await this.docClient.send(new DeleteCommand({
+        TableName: 'scheduled_posts_v2',
+        Key: {
+          user_id: userId,
+          post_id: postId
+        }
+      }));
+    } catch (error) {
+      console.error('DynamoDB deleteScheduledPost error:', error);
+      throw error;
+    }
+  }
+
+  // Scan for posts ready to publish (used by Lambda)
+  async getPostsToPublish(timeWindow = 5) {
+    try {
+      const now = new Date();
+      const windowStart = new Date(now.getTime() - timeWindow * 60 * 1000);
+      
+      const result = await this.docClient.send(new ScanCommand({
+        TableName: 'scheduled_posts_v2',
+        FilterExpression: '#status = :pending AND #scheduled_time BETWEEN :start AND :end',
+        ExpressionAttributeNames: {
+          '#status': 'status',
+          '#scheduled_time': 'scheduled_time'
+        },
+        ExpressionAttributeValues: {
+          ':pending': 'pending',
+          ':start': windowStart.toISOString(),
+          ':end': now.toISOString()
+        }
+      }));
+      return result.Items || [];
+    } catch (error) {
+      console.error('DynamoDB getPostsToPublish error:', error);
+      return [];
+    }
+  }
+
+  // Bulk insert scheduled posts
+  async bulkInsertScheduledPosts(posts) {
+    try {
+      const batchSize = 25; // DynamoDB limit for batch operations
+      const results = [];
+      
+      for (let i = 0; i < posts.length; i += batchSize) {
+        const batch = posts.slice(i, i + batchSize);
+        const putRequests = batch.map(post => ({
+          PutRequest: {
+            Item: post
+          }
+        }));
+        
+        const params = {
+          RequestItems: {
+            'scheduled_posts_v2': putRequests
+          }
+        };
+        
+        const result = await this.docClient.send(new BatchWriteCommand(params));
+        results.push(result);
+        
+        console.log(`Bulk inserted batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(posts.length / batchSize)}`);
+      }
+      
+      return results;
+    } catch (error) {
+      console.error('DynamoDB bulkInsertScheduledPosts error:', error);
+      throw error;
+    }
+  }
+
+  // Save/update posting schedule configuration
+  async savePostingSchedule(userId, businessCategory, scheduleConfig) {
+    try {
+      const item = {
+        user_id: userId,
+        business_category: businessCategory,
+        schedule_config: scheduleConfig,
+        active: true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      return await this.docClient.send(new PutCommand({
+        TableName: 'posting_schedules_v2',
+        Item: item
+      }));
+    } catch (error) {
+      console.error('DynamoDB savePostingSchedule error:', error);
+      throw error;
+    }
+  }
+
+  // Get user's posting schedule
+  async getPostingSchedule(userId, businessCategory) {
+    try {
+      const result = await this.docClient.send(new GetCommand({
+        TableName: 'posting_schedules_v2',
+        Key: {
+          user_id: userId,
+          business_category: businessCategory
+        }
+      }));
+      return result.Item || null;
+    } catch (error) {
+      console.error('DynamoDB getPostingSchedule error:', error);
+      return null;
+    }
+  }
+
+  // Delete all scheduled posts for a user (when regenerating schedule)
+  async deleteUserScheduledPosts(userId, businessCategory = null) {
+    try {
+      const posts = await this.getUserScheduledPosts(userId);
+      let postsToDelete = posts;
+      
+      if (businessCategory) {
+        postsToDelete = posts.filter(post => post.business_category === businessCategory);
+      }
+      
+      const batchSize = 25;
+      for (let i = 0; i < postsToDelete.length; i += batchSize) {
+        const batch = postsToDelete.slice(i, i + batchSize);
+        const deleteRequests = batch.map(post => ({
+          DeleteRequest: {
+            Key: {
+              user_id: post.user_id,
+              post_id: post.post_id
+            }
+          }
+        }));
+        
+        await this.docClient.send(new BatchWriteCommand({
+          RequestItems: {
+            'scheduled_posts_v2': deleteRequests
+          }
+        }));
+      }
+      
+      return { deleted_count: postsToDelete.length };
+    } catch (error) {
+      console.error('DynamoDB deleteUserScheduledPosts error:', error);
+      throw error;
+    }
+  }
 }
 
 module.exports = new DynamoDBService();

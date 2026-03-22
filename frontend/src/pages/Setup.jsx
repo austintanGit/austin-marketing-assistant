@@ -184,7 +184,7 @@ export default function Setup() {
         {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold text-gray-900">
-            Let's Set Up Your Austin Business
+            Let's Set Up Your Business
           </h1>
           <p className="mt-2 text-gray-600">
             This takes about 5 minutes. We'll use this to create your personalized marketing content.
@@ -306,7 +306,7 @@ export default function Setup() {
             {currentStep === 2 && (
               <div className="space-y-6">
                 <h2 className="text-2xl font-semibold text-gray-900 mb-6">
-                  Where are you located in Austin?
+                  Where is your business located?
                 </h2>
                 
                 <div>
@@ -316,7 +316,7 @@ export default function Setup() {
                   <input
                     {...register('address', { required: 'Address is required' })}
                     className="austin-input"
-                    placeholder="123 Main St, Austin, TX 78701"
+                    placeholder="123 Main St, Your City, State 12345"
                   />
                   {errors.address && (
                     <p className="text-red-500 text-sm mt-1">{errors.address.message}</p>
@@ -368,7 +368,7 @@ export default function Setup() {
                       maxLength: { value: 300, message: 'Must be under 300 characters' }
                     })}
                     className="austin-input h-24"
-                    placeholder="e.g. Young professionals in downtown Austin, families in South Austin, college students near UT campus..."
+                    placeholder="e.g. Young professionals in downtown area, families in suburbs, college students near campus..."
                   />
                   {errors.target_audience && (
                     <p className="text-red-500 text-sm mt-1">{errors.target_audience.message}</p>
@@ -379,9 +379,9 @@ export default function Setup() {
                 </div>
 
                 <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
-                  <h3 className="font-semibold text-yellow-800 mb-2">💡 Austin Tips:</h3>
+                  <h3 className="font-semibold text-yellow-800 mb-2">💡 Local Marketing Tips:</h3>
                   <ul className="text-sm text-yellow-700 space-y-1">
-                    <li>• Mention specific Austin neighborhoods (East 6th, South Lamar, North Loop)</li>
+                    <li>• Mention specific neighborhoods or areas in your city</li>
                     <li>• Think about age groups and lifestyle (UT students, young families, retirees)</li>
                     <li>• Consider local interests (live music, food trucks, outdoor activities)</li>
                   </ul>
@@ -404,8 +404,8 @@ export default function Setup() {
                     {[
                       { value: 'friendly', label: 'Friendly & Welcoming', desc: 'Warm, approachable, like talking to neighbors' },
                       { value: 'professional', label: 'Professional & Trustworthy', desc: 'Reliable, expert, builds confidence' },
-                      { value: 'casual', label: 'Casual & Laid-back', desc: 'Relaxed Austin vibes, conversational' },
-                      { value: 'quirky', label: 'Quirky & Creative', desc: 'Keep Austin Weird energy, unique personality' }
+                      { value: 'casual', label: 'Casual & Laid-back', desc: 'Relaxed, friendly vibes, conversational' },
+                      { value: 'quirky', label: 'Quirky & Creative', desc: 'Unique local energy, distinctive personality' }
                     ].map(tone => (
                       <label key={tone.value} className="cursor-pointer">
                         <input

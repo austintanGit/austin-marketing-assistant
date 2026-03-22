@@ -15,6 +15,9 @@ import {
   ChatBubbleLeftRightIcon,
   ArrowTrendingUpIcon,
   SparklesIcon,
+  ClockIcon,
+  EyeIcon,
+  BoltIcon, // Add for AI Credits
 } from '@heroicons/react/24/outline'
 import FacebookPostModal from '../components/FacebookPostModal'
 import EmailWriterModal from '../components/EmailWriterModal'
@@ -30,6 +33,7 @@ export default function Dashboard() {
   const [fbPosts, setFbPosts] = useState([])
   const [subscription, setSubscription] = useState(null)
   const [connections, setConnections] = useState({})
+  const [quota, setQuota] = useState(null) // Add quota state
   const [loading, setLoading] = useState(true)
   const [fbModal, setFbModal] = useState({ open: false, initialMessage: '' })
   const [emailModal, setEmailModal] = useState(false)
@@ -58,17 +62,19 @@ export default function Dashboard() {
 
   const loadDashboardData = async () => {
     try {
-      const [businessRes, subscriptionRes, connectionsRes, fbPostsRes] = await Promise.all([
+      const [businessRes, subscriptionRes, connectionsRes, fbPostsRes, quotaRes] = await Promise.all([
         api.get('/business/profile').catch(() => ({ data: { business: null } })),
         api.get('/payments/subscription').catch(() => ({ data: { subscription: null } })),
         api.get('/social/connections').catch(() => ({ data: { connections: {} } })),
         api.get('/social/facebook/posts').catch(() => ({ data: { posts: [] } })),
+        api.get('/social/quota').catch(() => ({ data: { quotas: null } })) // Add quota loading
       ])
       const biz = businessRes.data.business
       setBusiness(biz)
       setSubscription(subscriptionRes.data.subscription)
       setConnections(connectionsRes.data.connections || {})
       setFbPosts(fbPostsRes.data.posts || [])
+      setQuota(quotaRes.data.quotas) // Set quota data
       if (biz) {
         // Check for logo existence - 404 is expected if no logo
         api.get('/business/logo', { responseType: 'blob' })
@@ -346,13 +352,14 @@ export default function Dashboard() {
           iconBg="bg-blue-100 text-[#1877F2]"
         />
         <StatCard
-          label="AI Tools"
-          value={getActiveToolsCount()}
-          sub={getActiveToolsText()}
-          progress={getActiveToolsProgress()}
-          progressColor="bg-orange-400"
-          icon={<SparklesIcon className="h-5 w-5" />}
-          iconBg="bg-orange-100 text-orange-500"
+          label="AI Credits"
+          value={quota ? `${quota.content_generate.remaining}/${quota.content_generate.limit}` : 'Loading...'}
+          sub={quota?.plan === 'trial' ? 'Trial credits' : 'Monthly credits'}
+          progress={quota ? Math.round((quota.content_generate.used / quota.content_generate.limit) * 100) : 0}
+          progressColor={quota && quota.content_generate.remaining < 5 ? 'bg-red-500' : 'bg-austin-orange'}
+          icon={<BoltIcon className="h-5 w-5" />}
+          iconBg={quota && quota.content_generate.remaining < 5 ? 'bg-red-100 text-red-600' : 'bg-orange-100 text-austin-orange'}
+          warning={quota && quota.content_generate.remaining < 5}
         />
       </div>
 
@@ -418,13 +425,13 @@ export default function Dashboard() {
           />
 
           <ActionCard
-            bg="bg-gradient-to-br from-orange-400 to-rose-500"
-            icon={<ArrowTrendingUpIcon className="h-6 w-6 text-white" />}
+            bg="bg-gradient-to-br from-austin-orange to-orange-600"
+            icon={<CalendarDaysIcon className="h-6 w-6 text-white" />}
             iconBg="bg-white/10"
-            title="Upgrade to Pro"
-            description={subscription?.plan === 'pro' ? 'You\'re already on Pro!' : 'Unlock more AI generations'}
-            action={subscription?.plan === 'pro' ? 'Manage plan →' : 'Upgrade now →'}
-            onClick={subscription?.plan === 'pro' ? openPortal : () => (hasActiveSubscription ? upgradeSubscription() : startSubscription('pro'))}
+            title="Scheduled Posts"
+            description="Manage your automated posting"
+            action="View schedule →"
+            href="/scheduled-posts"
           />
 
         </div>
@@ -444,18 +451,24 @@ export default function Dashboard() {
 
 // ─── Stat Card ─────────────────────────────────────────────────────────────────
 
-function StatCard({ label, value, sub, progress, progressColor, icon, iconBg }) {
+function StatCard({ label, value, sub, progress, progressColor, icon, iconBg, warning = false }) {
   return (
-    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5">
+    <div className={`bg-white rounded-2xl border shadow-sm p-5 ${warning ? 'border-red-200 bg-red-50/30' : 'border-gray-100'}`}>
       <div className="flex items-start justify-between mb-3">
         <div className={`rounded-xl p-2.5 ${iconBg}`}>{icon}</div>
+        {warning && (
+          <ExclamationTriangleIcon className="h-4 w-4 text-red-500" />
+        )}
       </div>
       <p className="text-2xl font-bold text-gray-900 leading-none">{value}</p>
-      <p className="text-xs text-gray-400 mt-1 mb-3">{sub}</p>
+      <p className={`text-xs mt-1 mb-3 ${warning ? 'text-red-600' : 'text-gray-400'}`}>{sub}</p>
       <div className="space-y-1.5">
         <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
           <div className={`h-full rounded-full ${progressColor} transition-all`} style={{ width: `${progress}%` }} />
         </div>
+        {warning && (
+          <p className="text-xs text-red-600">Low credits remaining</p>
+        )}
         <p className="text-[11px] text-gray-400">{label}</p>
       </div>
     </div>
@@ -610,13 +623,20 @@ function FbPostsSection({ posts, facebookConnected, onOpenFbModal }) {
             {posts.length > 0 ? `${posts.length} post${posts.length !== 1 ? 's' : ''} published` : 'No posts yet'}
           </p>
         </div>
-        {facebookConnected && (
-          <button onClick={() => onOpenFbModal('')}
-            className="flex items-center gap-1.5 text-xs font-semibold text-white bg-[#1877F2] hover:bg-blue-700 px-4 py-2 rounded-xl transition-colors">
-            <PlusIcon className="h-3.5 w-3.5" />
-            New Post
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {facebookConnected && (
+            <button onClick={() => onOpenFbModal('')}
+              className="flex items-center gap-1.5 text-xs font-semibold text-white bg-[#1877F2] hover:bg-blue-700 px-4 py-2 rounded-xl transition-colors">
+              <PlusIcon className="h-3.5 w-3.5" />
+              New Post
+            </button>
+          )}
+          <Link to="/scheduled-posts"
+            className="flex items-center gap-1.5 text-xs font-semibold text-gray-600 border border-gray-200 hover:border-gray-300 px-4 py-2 rounded-xl transition-colors">
+            <CalendarDaysIcon className="h-3.5 w-3.5" />
+            Scheduled Posts
+          </Link>
+        </div>
       </div>
 
       <div className="divide-y divide-gray-50 max-h-[400px] overflow-y-auto">

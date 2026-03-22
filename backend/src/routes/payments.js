@@ -83,8 +83,12 @@ router.post('/create-trial', authenticateToken, async (req, res) => {
     if (!user) return res.status(404).json({ error: 'User not found' });
 
     const existingSubscription = await dynamodb.getUserSubscription(req.user.userId);
-    if (existingSubscription) {
-      return res.status(400).json({ error: 'User already has a subscription' });
+    if (existingSubscription && existingSubscription.status === 'active') {
+      return res.status(400).json({ 
+        error: 'User already has an active subscription',
+        current_plan: existingSubscription.plan,
+        expires: existingSubscription.current_period_end
+      });
     }
 
     // Create trial subscription (7 days from now)

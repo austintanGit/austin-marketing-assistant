@@ -49,12 +49,12 @@ export default function Success() {
             <CheckCircleIcon className="h-16 w-16 text-green-500 mx-auto mb-6" />
             
             <h1 className="text-3xl font-bold text-gray-900 mb-4">
-              Welcome to the Austin Marketing Family! 🤠
+              Welcome to the Marketing Assistant Family! 🎉
             </h1>
             
             <p className="text-lg text-gray-600 mb-8">
               Your subscription is now active! Let's generate your first month of 
-              Austin-specific marketing content.
+              Location-specific marketing content.
             </p>
 
             <div className="bg-austin-blue bg-opacity-10 rounded-lg p-6 mb-8">
@@ -68,7 +68,7 @@ export default function Success() {
                 </div>
                 <div className="flex items-center">
                   <SparklesIcon className="h-5 w-5 mr-3" />
-                  <span>Get Austin-specific posts about SXSW, ACL, and local events</span>
+                  <span>Get location-specific posts about local events and community activities</span>
                 </div>
                 <div className="flex items-center">
                   <SparklesIcon className="h-5 w-5 mr-3" />

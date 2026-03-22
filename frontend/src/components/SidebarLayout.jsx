@@ -4,6 +4,8 @@ import { useAuth } from '../contexts/AuthContext'
 import {
   Squares2X2Icon,
   LinkIcon,
+  CalendarDaysIcon,
+  UserIcon,
   ArrowRightOnRectangleIcon,
   Bars3Icon,
   XMarkIcon,
@@ -11,7 +13,9 @@ import {
 
 const navItems = [
   { to: '/dashboard',        label: 'Dashboard',       icon: Squares2X2Icon },
+  { to: '/scheduled-posts',  label: 'Scheduled Posts', icon: CalendarDaysIcon },
   { to: '/connect-accounts', label: 'Connect Accounts', icon: LinkIcon },
+  { to: '/setup',           label: 'Edit Profile',    icon: UserIcon },
 ]
 
 export default function SidebarLayout() {
@@ -51,7 +55,7 @@ export default function SidebarLayout() {
 
         {/* Nav */}
         <nav className="flex-1 px-3 py-6 space-y-1 overflow-y-auto">
-          {navItems.map(({ to, label, icon: Icon }) => (
+          {navItems.slice(0, -1).map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -68,6 +72,27 @@ export default function SidebarLayout() {
               {label}
             </NavLink>
           ))}
+
+          {/* Separator for user-specific actions */}
+          <div className="pt-4 border-t border-white/10">
+            {navItems.slice(-1).map(({ to, label, icon: Icon }) => (
+              <NavLink
+                key={to}
+                to={to}
+                onClick={() => setMobileOpen(false)}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition-colors ${
+                    isActive
+                      ? 'bg-white/10 text-white'
+                      : 'text-gray-400 hover:bg-white/5 hover:text-white'
+                  }`
+                }
+              >
+                <Icon className="h-5 w-5 shrink-0" />
+                {label}
+              </NavLink>
+            ))}
+          </div>
         </nav>
 
         {/* User + logout */}

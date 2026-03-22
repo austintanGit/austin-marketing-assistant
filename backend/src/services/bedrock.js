@@ -41,14 +41,14 @@ class BedrockService {
     }
   }
 
-  // Generate Austin-specific social media posts
+  // Generate location-specific social media posts
   async generateSocialPosts(businessData, count = 10) {
     const currentDate = new Date();
     const month = currentDate.toLocaleString('default', { month: 'long' });
     const season = this.getCurrentSeason();
-    const austinEvents = this.getAustinEvents(currentDate);
+    const locationContext = this.getLocationContext(businessData.address);
 
-    const prompt = `Generate ${count} engaging social media posts for a ${businessData.business_type} in Austin, Texas.
+    const prompt = `Generate ${count} engaging social media posts for a ${businessData.business_type}${businessData.address ? ` in ${businessData.address}` : ''}.
 
 Business Details:
 - Name: ${businessData.business_name}
@@ -56,20 +56,20 @@ Business Details:
 - Description: ${businessData.description}
 - Target Audience: ${businessData.target_audience}
 - Tone: ${businessData.tone}
-- Location: ${businessData.address}
+- Location: ${businessData.address || 'Local business'}
 
-Austin Context:
+Local Context:
 - Current season: ${season}
-- Upcoming events: ${austinEvents}
-- Local culture: Keep Austin Weird, live music, food trucks, outdoor activities
-- Local landmarks: Capitol, Lady Bird Lake, Zilker Park, South by Southwest, ACL
+- Local events and seasonal activities: ${locationContext}
+- Community engagement opportunities
+- Seasonal business considerations
 
 Requirements:
 - Mix of promotional and community engagement posts
-- Include Austin-specific references where natural
+- Include location-specific references when relevant and natural
 - Vary post types: tips, behind-the-scenes, customer spotlights, local events
 - Keep posts concise (under 280 characters when possible)
-- Include relevant hashtags (#Austin, #KeepAustinLocal, etc.)
+- Include relevant hashtags (location-based if applicable)
 - ${businessData.tone} tone throughout
 
 Format each post as:
@@ -86,24 +86,24 @@ POST [number]:
   async generateGMBPosts(businessData, count = 8) {
     const currentDate = new Date();
     const season = this.getCurrentSeason();
-    const austinEvents = this.getAustinEvents(currentDate);
+    const locationContext = this.getLocationContext(businessData.address);
 
-    const prompt = `Generate ${count} Google My Business posts for a ${businessData.business_type} in Austin, Texas.
+    const prompt = `Generate ${count} Google My Business posts for a ${businessData.business_type}${businessData.address ? ` in ${businessData.address}` : ''}.
 
 Business Details:
 - Name: ${businessData.business_name}
 - Type: ${businessData.business_type}
 - Description: ${businessData.description}
-- Location: ${businessData.address}
+- Location: ${businessData.address || 'Local business'}
 
-Austin Context:
+Local Context:
 - Current season: ${season}
-- Local events: ${austinEvents}
-- Local keywords: Austin, Texas, local, downtown, east austin, south austin
+- Local events and activities: ${locationContext}
+- Community engagement opportunities
 
 Requirements:
 - Focus on local SEO optimization
-- Include location-specific keywords naturally
+- Include location-specific keywords naturally when relevant
 - Mix of: offers, updates, events, tips
 - Each post should be 100-300 words
 - Professional but ${businessData.tone} tone
@@ -159,11 +159,12 @@ Body:
 
   // Generate a Facebook post caption based on an image description and business context
   async generateCaptionFromImageDescription(imageDescription, businessData) {
-    const prompt = `You are a social media expert for a local Austin business.
+    const prompt = `You are a social media expert for a local business.
 
 Business: ${businessData.business_name} (${businessData.business_type})
 Tone: ${businessData.tone || 'friendly'}
-Target audience: ${businessData.target_audience || 'local Austin community'}
+Target audience: ${businessData.target_audience || 'local community'}
+Location: ${businessData.address || 'Local area'}
 
 The business owner has a photo they want to post. Here is their description of the image:
 "${imageDescription}"
@@ -171,7 +172,7 @@ The business owner has a photo they want to post. Here is their description of t
 Write a compelling Facebook post caption for this photo. Requirements:
 - Match the business tone (${businessData.tone || 'friendly'})
 - Keep it under 200 characters if possible
-- Include 2-3 relevant hashtags including #Austin
+- Include 2-3 relevant hashtags including location-based ones if appropriate
 - Sound natural and authentic, not like marketing copy
 - Encourage engagement (ask a question or include a call to action)
 
@@ -183,6 +184,8 @@ Return ONLY the caption text with hashtags. No explanations, no quotes.`;
   // Generate an image using Amazon Nova Canvas
   async generateImage(prompt) {
     try {
+      console.log('🎨 Generating image with prompt:', prompt.substring(0, 100) + '...');
+      
       const command = new InvokeModelCommand({
         modelId: 'amazon.nova-canvas-v1:0',
         contentType: 'application/json',
@@ -201,11 +204,65 @@ Return ONLY the caption text with hashtags. No explanations, no quotes.`;
         }),
       });
 
+      console.log('📤 Sending Nova Canvas request...');
       const response = await this.client.send(command);
       const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-      return responseBody.images[0]; // base64 string
+      
+      console.log('📦 Nova Canvas response structure:', JSON.stringify(responseBody, null, 2));
+
+      // Handle different possible response structures
+      if (responseBody.error) {
+        throw new Error(`Nova Canvas API error: ${responseBody.error.message || JSON.stringify(responseBody.error)}`);
+      }
+
+      // Check for images array (expected structure)
+      if (responseBody.images && responseBody.images.length > 0) {
+        console.log('✅ Found images array, returning first image');
+        return responseBody.images[0]; // base64 string
+      }
+
+      // Check for single image property
+      if (responseBody.image) {
+        console.log('✅ Found single image property, returning image');
+        return responseBody.image; // base64 string
+      }
+
+      // Check for data array
+      if (responseBody.data && responseBody.data.length > 0) {
+        console.log('✅ Found data array, returning first item');
+        return responseBody.data[0]; // base64 string
+      }
+
+      // Check for result.images structure
+      if (responseBody.result && responseBody.result.images && responseBody.result.images.length > 0) {
+        console.log('✅ Found result.images array, returning first image');
+        return responseBody.result.images[0]; // base64 string
+      }
+
+      // If we get here, the response structure is unexpected
+      console.error('❌ Unexpected Nova Canvas response structure:', responseBody);
+      throw new Error('No image data found in Nova Canvas response. Response structure: ' + JSON.stringify(Object.keys(responseBody)));
+
     } catch (error) {
-      console.error('Bedrock image generation error:', error);
+      console.error('❌ Bedrock image generation error:', error);
+      
+      // Handle different error types
+      if (error.name === 'ValidationException') {
+        throw new Error('Invalid request to Nova Canvas. Please check the model availability and request format.');
+      }
+      
+      if (error.name === 'AccessDeniedException') {
+        throw new Error('Access denied to Nova Canvas. Please check your AWS permissions and model access.');
+      }
+      
+      if (error.name === 'ResourceNotFoundException') {
+        throw new Error('Nova Canvas model not found. Please verify model ID and availability in your region.');
+      }
+      
+      if (error.name === 'ThrottlingException') {
+        throw new Error('Nova Canvas request was throttled. Please try again in a few moments.');
+      }
+
       const msg = error?.message || error?.name || 'Unknown error';
       throw new Error(`Failed to generate image: ${msg}`);
     }
@@ -220,6 +277,27 @@ Return ONLY the caption text with hashtags. No explanations, no quotes.`;
     return 'Winter';
   }
 
+  getLocationContext(address) {
+    if (!address) {
+      return 'seasonal activities, local community events, regional celebrations';
+    }
+    
+    // Extract city/location from address for basic context
+    const addressLower = address.toLowerCase();
+    
+    if (addressLower.includes('austin')) {
+      return 'SXSW Festival, ACL Festival, Keep Austin Weird culture, live music scene, food truck culture, outdoor activities';
+    } else if (addressLower.includes('new york') || addressLower.includes('nyc')) {
+      return 'seasonal festivals, Broadway shows, street fairs, cultural events, neighborhood activities';
+    } else if (addressLower.includes('los angeles') || addressLower.includes('la')) {
+      return 'outdoor events, beach activities, farmers markets, cultural festivals, entertainment industry events';
+    } else {
+      // Generic local context for any location
+      return 'local festivals, seasonal celebrations, community events, farmers markets, outdoor activities';
+    }
+  }
+
+  // Keep Austin-specific method for backward compatibility but make it more generic
   getAustinEvents(date) {
     const month = date.getMonth() + 1;
     const events = {

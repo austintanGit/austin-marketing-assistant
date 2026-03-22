@@ -1,0 +1,22 @@
+console.log('🔍 Facebook Page Access Checker');
+console.log('==============================\n');
+
+console.log('📋 To check what Facebook pages you have admin access to:');
+console.log('');
+console.log('1. Go to: https://www.facebook.com/pages/');
+console.log('2. Look for pages where your role is "Admin" or "Editor"');
+console.log('3. Only these pages will appear in your app\'s connection');
+console.log('');
+console.log('❗ Common Issues:');
+console.log('   • "Tan Estates Manage" - you might be a viewer/moderator (not admin)');
+console.log('   • Page might be unpublished/hidden');
+console.log('   • You might need to be added as admin by the page owner');
+console.log('');
+console.log('✅ Quick Fix:');
+console.log('   1. Create your own Business Page: https://www.facebook.com/pages/create');
+console.log('   2. Name it "Austin Marketing Assistant" (or your business name)');
+console.log('   3. Make sure to PUBLISH the page (not keep it as draft)');
+console.log('   4. Disconnect Facebook in your app and reconnect');
+console.log('   5. Your new page should now appear and work for posting');
+console.log('');
+console.log('🎯 The key is that you need ADMIN access to post to a Facebook page!');
