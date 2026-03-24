@@ -122,10 +122,8 @@ router.get('/connections', authenticateToken, async (req, res) => {
   try {
     // Use string userId directly (no parsing needed)
     const userId = req.user.userId;
-    console.log('🔍 Loading connections for user:', userId);
 
     const rows = await dynamodb.getUserSocialConnections(userId);
-    console.log('📊 Raw connections from DB:', rows);
 
     const connections = {};
     rows.forEach(row => {
@@ -138,7 +136,6 @@ router.get('/connections', authenticateToken, async (req, res) => {
       };
     });
 
-    console.log('📋 Formatted connections:', connections);
     res.json({ connections });
   } catch (err) {
     console.error('Get connections error:', err);

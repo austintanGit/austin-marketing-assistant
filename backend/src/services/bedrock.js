@@ -184,8 +184,6 @@ Return ONLY the caption text with hashtags. No explanations, no quotes.`;
   // Generate an image using Amazon Nova Canvas
   async generateImage(prompt) {
     try {
-      console.log('🎨 Generating image with prompt:', prompt.substring(0, 100) + '...');
-      
       const command = new InvokeModelCommand({
         modelId: 'amazon.nova-canvas-v1:0',
         contentType: 'application/json',
@@ -204,12 +202,9 @@ Return ONLY the caption text with hashtags. No explanations, no quotes.`;
         }),
       });
 
-      console.log('📤 Sending Nova Canvas request...');
       const response = await this.client.send(command);
       const responseBody = JSON.parse(new TextDecoder().decode(response.body));
       
-      console.log('📦 Nova Canvas response structure:', JSON.stringify(responseBody, null, 2));
-
       // Handle different possible response structures
       if (responseBody.error) {
         throw new Error(`Nova Canvas API error: ${responseBody.error.message || JSON.stringify(responseBody.error)}`);
@@ -217,25 +212,21 @@ Return ONLY the caption text with hashtags. No explanations, no quotes.`;
 
       // Check for images array (expected structure)
       if (responseBody.images && responseBody.images.length > 0) {
-        console.log('✅ Found images array, returning first image');
         return responseBody.images[0]; // base64 string
       }
 
       // Check for single image property
       if (responseBody.image) {
-        console.log('✅ Found single image property, returning image');
         return responseBody.image; // base64 string
       }
 
       // Check for data array
       if (responseBody.data && responseBody.data.length > 0) {
-        console.log('✅ Found data array, returning first item');
         return responseBody.data[0]; // base64 string
       }
 
       // Check for result.images structure
       if (responseBody.result && responseBody.result.images && responseBody.result.images.length > 0) {
-        console.log('✅ Found result.images array, returning first image');
         return responseBody.result.images[0]; // base64 string
       }
 

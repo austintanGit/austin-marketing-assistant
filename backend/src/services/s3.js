@@ -141,8 +141,6 @@ async function storePexelsPhoto(imageUrl, options = {}) {
 async function deleteImages(keys) {
   if (!keys || keys.length === 0) return;
   
-  console.log(`Deleting ${keys.length} images from S3:`, keys);
-  
   const deletePromises = keys.map(key => {
     return deleteKey(key).catch(error => {
       console.warn(`Failed to delete S3 key ${key}:`, error.message);

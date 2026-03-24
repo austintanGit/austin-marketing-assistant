@@ -54,8 +54,6 @@ router.post('/register', async (req, res) => {
       cancel_at_period_end: true // Trial ends automatically
     });
 
-    console.log(`✅ Created user ${result.id} with automatic 7-day trial`);
-
     // Generate JWT token
     const token = jwt.sign(
       { userId: result.id, email },

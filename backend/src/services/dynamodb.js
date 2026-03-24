@@ -455,11 +455,7 @@ class DynamoDBService {
 
   // Social connection operations
   async createOrUpdateSocialConnection(userId, platform, connectionData) {
-    console.log('💾 createOrUpdateSocialConnection - connected status:', this.connected);
-    console.log('📊 Connection data to save:', { userId, platform, connectionData });
-    
     if (!this.connected) {
-      console.log(`📝 DynamoDB fallback: createOrUpdateSocialConnection (${platform}) - using mock data`);
       const connection = {
         user_id: userId,
         platform,
@@ -468,11 +464,8 @@ class DynamoDBService {
         created_at: new Date().toISOString()
       };
       this.mockData.set(`social:${userId}:${platform}`, connection);
-      console.log('📊 Saved to mock data:', connection);
       return Promise.resolve(connection);
     }
-
-    console.log('💾 Using real DynamoDB for createOrUpdateSocialConnection');
 
     const timestamp = new Date().toISOString();
 
@@ -492,22 +485,18 @@ class DynamoDBService {
       created_at: connectionData.created_at || timestamp,
       updated_at: timestamp
     };
-
-    console.log('📊 Item to save to DynamoDB:', item);
     
     try {
       await this.put(item);
-      console.log('✅ Item saved successfully to DynamoDB');
       return item;
     } catch (error) {
-      console.error('❌ Failed to save to DynamoDB:', error);
+      console.error('❌ Failed to save social connection to DynamoDB:', error);
       throw error;
     }
   }
 
   async getUserSocialConnection(userId, platform) {
     if (!this.connected) {
-      console.log(`📝 DynamoDB fallback: getUserSocialConnection (${platform}) - using mock data`);
       const connection = this.mockData.get(`social:${userId}:${platform}`);
       return Promise.resolve(connection || null);
     }
@@ -516,21 +505,15 @@ class DynamoDBService {
   }
 
   async getUserSocialConnections(userId) {
-    console.log('🔍 getUserSocialConnections - connected status:', this.connected);
-    
     if (!this.connected) {
-      console.log('📝 DynamoDB fallback: getUserSocialConnections - using mock data');
       const connections = [];
       for (const [key, connection] of this.mockData.entries()) {
         if (key.startsWith(`social:${userId}:`)) {
           connections.push(connection);
         }
       }
-      console.log('📊 Mock data connections:', connections);
       return Promise.resolve(connections);
     }
-
-    console.log('💾 Using real DynamoDB for getUserSocialConnections');
     
     try {
       const result = await this.query({
@@ -540,7 +523,6 @@ class DynamoDBService {
           ':sk': 'SOCIAL#'
         }
       });
-      console.log('📊 DynamoDB query result:', result);
       return result;
     } catch (error) {
       console.error('❌ DynamoDB query failed:', error);
@@ -550,7 +532,6 @@ class DynamoDBService {
 
   async deleteSocialConnection(userId, platform) {
     if (!this.connected) {
-      console.log(`📝 DynamoDB fallback: deleteSocialConnection (${platform}) - using mock data`);
       this.mockData.delete(`social:${userId}:${platform}`);
       return Promise.resolve(true);
     }
@@ -595,7 +576,6 @@ class DynamoDBService {
   // Get user's social posts
   async getUserSocialPosts(userId, platform = null, limit = 50) {
     if (!this.connected) {
-      console.log('📝 DynamoDB fallback: getUserSocialPosts - using mock data');
       return Promise.resolve([]);
     }
 
@@ -632,7 +612,6 @@ class DynamoDBService {
   // Get monthly social posts count
   async getMonthlySocialPostsCount(userId, platform = null) {
     if (!this.connected) {
-      console.log('📝 DynamoDB fallback: getMonthlySocialPostsCount - using mock data');
       return Promise.resolve(0);
     }
 
@@ -976,21 +955,23 @@ class DynamoDBService {
   async getPostsToPublish(timeWindow = 5) {
     try {
       const now = new Date();
-      const windowStart = new Date(now.getTime() - timeWindow * 60 * 1000);
       
+      // Get all pending posts that are due (scheduled_time <= now)
+      // This catches both recent posts and overdue posts
       const result = await this.docClient.send(new ScanCommand({
         TableName: 'scheduled_posts_v2',
-        FilterExpression: '#status = :pending AND #scheduled_time BETWEEN :start AND :end',
+        FilterExpression: '#status = :pending AND #scheduled_time <= :now',
         ExpressionAttributeNames: {
           '#status': 'status',
           '#scheduled_time': 'scheduled_time'
         },
         ExpressionAttributeValues: {
           ':pending': 'pending',
-          ':start': windowStart.toISOString(),
-          ':end': now.toISOString()
+          ':now': now.toISOString()
         }
       }));
+      
+      console.log(`Found ${result.Items?.length || 0} posts ready to publish at ${now.toISOString()}`);
       return result.Items || [];
     } catch (error) {
       console.error('DynamoDB getPostsToPublish error:', error);
@@ -1020,8 +1001,6 @@ class DynamoDBService {
         
         const result = await this.docClient.send(new BatchWriteCommand(params));
         results.push(result);
-        
-        console.log(`Bulk inserted batch ${Math.floor(i / batchSize) + 1} of ${Math.ceil(posts.length / batchSize)}`);
       }
       
       return results;
